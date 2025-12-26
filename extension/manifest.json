@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Ally Humai Collector",
+  "version": "1.0.0",
+  "description": "Recolecta perfiles de LinkedIn y envía candidatos al bridge local de Ally Humai.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://www.linkedin.com/in/*",
+    "http://localhost:8000/*",
+    "https://preview--grow-agency-pro.lovable.app/*",
+    "https://grow-agency-pro.lovable.app/*"
+  ],
+  "action": {
+    "default_title": "Ally Humai Collector"
+  },
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.linkedin.com/*", "https://linkedin.com/*"],
+      "js": ["content-script-linkedin.js"]
+    },
+    {
+      "matches": [
+        "https://preview--grow-agency-pro.lovable.app/*",
+        "https://grow-agency-pro.lovable.app/*"
+      ],
+      "js": ["content-script-lovable.js"]
+    }
+  ]
+}
