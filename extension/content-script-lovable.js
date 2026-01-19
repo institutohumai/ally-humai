@@ -11,30 +11,38 @@ window.addEventListener('message', (event) => {
 
     // Mapear snake_case a camelCase
     const payload = event.data.payload || {};
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-      chrome.runtime.sendMessage({
-        type: 'ALLY_SUPABASE_SESSION',
-        payload: {
-          accessToken: payload.access_token,
-          refreshToken: payload.refresh_token,
-          userId: payload.user_id,
-          expiresAt: payload.expires_at
-        }
-      });
-      console.log('[Ally Content Script] Sesión reenviada al service worker');
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) {
+      try {
+        chrome.runtime.sendMessage({
+          type: 'ALLY_SUPABASE_SESSION',
+          payload: {
+            accessToken: payload.access_token,
+            refreshToken: payload.refresh_token,
+            userId: payload.user_id,
+            expiresAt: payload.expires_at
+          }
+        });
+        console.log('[Ally Content Script] Sesión reenviada al service worker');
+      } catch (error) {
+        console.warn('[Ally Content Script] Extension context invalidated, recarga la página', error.message);
+      }
     } else {
-      console.error('[Ally Content Script] chrome.runtime.sendMessage no está disponible', { chrome });
+      console.warn('[Ally Content Script] Extension context no disponible, recarga la página');
     }
   }
 
   if (event.data.type === 'ALLY_SESSION_LOGOUT') {
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-      chrome.runtime.sendMessage({
-        type: 'ALLY_CLEAR_SESSION'
-      });
-      console.log('[Ally Content Script] Logout reenviado al service worker');
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) {
+      try {
+        chrome.runtime.sendMessage({
+          type: 'ALLY_CLEAR_SESSION'
+        });
+        console.log('[Ally Content Script] Logout reenviado al service worker');
+      } catch (error) {
+        console.warn('[Ally Content Script] Extension context invalidated para logout', error.message);
+      }
     } else {
-      console.error('[Ally Content Script] chrome.runtime.sendMessage no está disponible para logout', { chrome });
+      console.warn('[Ally Content Script] Extension context no disponible para logout');
     }
   }
 });

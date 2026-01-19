@@ -1,3 +1,22 @@
+// --- Utilidad para obtener el profileId desde la URL ---
+function getProfileIdFromUrl() {
+	const match = window.location.pathname.match(/^\/in\/([^/]+)/);
+	return match ? match[1] : null;
+}
+
+// --- Jitter aleatorio para anti-ban ---
+function randomJitter(min = 400, max = 1200) {
+	return new Promise(res => setTimeout(res, Math.floor(Math.random() * (max - min + 1)) + min));
+}
+
+// --- Solicita el JSON de Voyager al service worker ---
+function getVoyagerProfileJson(profileId) {
+	return new Promise(resolve => {
+		chrome.runtime.sendMessage({ type: "ALLY_GET_VOYAGER_PROFILE", profileId }, (resp) => {
+			resolve(resp?.json || null);
+		});
+	});
+}
 
 // === INICIO: Código migrado desde content.js ===
 const POLL_INTERVAL_MS = 1500;
@@ -297,10 +316,21 @@ function getElementText(el) {
 	if (!el) {
 		return undefined;
 	}
-	const text = (el.innerText || el.textContent || "").trim();
+	let text = (el.innerText || el.textContent || "").trim();
 	if (!text) {
 		return undefined;
 	}
+	// Limpiar duplicados y múltiples saltos de línea
+	text = text.replace(/\n+/g, '\n').trim();
+	// Eliminar duplicados causados por elementos repetidos
+	const lines = text.split('\n');
+	const uniqueLines = [];
+	for (let i = 0; i < lines.length; i++) {
+		if (i === 0 || lines[i] !== lines[i - 1]) {
+			uniqueLines.push(lines[i]);
+		}
+	}
+	text = uniqueLines.join('\n').trim();
 	highlightElement(el);
 	return text;
 }
@@ -313,7 +343,8 @@ function deriveLastName(fullName) {
 	if (parts.length < 2) {
 		return undefined;
 	}
-	return parts.slice(1).join(" ");
+	// Retornar solo el último apellido (última palabra)
+	return parts[parts.length - 1];
 }
 
 function extractPortfolioLink() {
@@ -439,11 +470,23 @@ function extractEducation() {
 		const dateText = selectTextWithin(item, "span.t-14.t-normal.t-black--light span[aria-hidden='true'], span.t-14.t-normal.t-black--light");
 		const { date_from, date_to } = parseDateRange(dateText);
 
+		// Limpiar duplicados de fechas si existen
+		let cleanDateFrom = date_from;
+		let cleanDateTo = date_to;
+		if (cleanDateTo && cleanDateTo.includes('\n')) {
+			const parts = cleanDateTo.split('\n').filter(Boolean);
+			cleanDateTo = parts[0];
+		}
+		if (cleanDateFrom && cleanDateFrom.includes('\n')) {
+			const parts = cleanDateFrom.split('\n').filter(Boolean);
+			cleanDateFrom = parts[0];
+		}
+
 		entries.push({
 			institution,
 			degree: degree || undefined,
-			date_from,
-			date_to
+			date_from: cleanDateFrom,
+			date_to: cleanDateTo
 		});
 	}
 
@@ -476,89 +519,166 @@ function extractEnglishLevel() {
 }
 
 function gatherCandidate() {
-	if (!document.body) {
-		console.warn("[Ally] Document not ready; skipping scrape");
-		return undefined;
-	}
+	return (async () => {
+		if (!document.body) {
+			console.warn("[Ally] Document not ready; skipping scrape");
+			return undefined;
+		}
 
-	const candidate = {};
+		// Jitter anti-ban
+		await randomJitter();
 
-	for (const [key, extractors] of Object.entries(fieldExtractors)) {
-		for (const extractor of extractors) {
-			const value = extractor();
-			if (value) {
-				candidate[key] = value;
-				break;
+		// Buffer/duplicados
+		const canonicalProfilePath = getCanonicalProfilePath(window.location.pathname);
+		const lastSent = sessionStorage.getItem("ally:lastSent");
+		if (lastSent === canonicalProfilePath) {
+			return undefined;
+		}
+
+		// --- 1. Intentar armar el candidato SOLO con JSON de Voyager ---
+		let voyagerJson = null;
+		const profileId = getProfileIdFromUrl();
+		if (profileId) {
+			voyagerJson = await getVoyagerProfileJson(profileId);
+		}
+		let candidate = {};
+		if (voyagerJson) {
+			// Extraer todos los campos posibles del JSON
+			candidate = {
+				name: voyagerJson.firstName && voyagerJson.lastName ? `${voyagerJson.firstName} ${voyagerJson.lastName}` : undefined,
+				headline: voyagerJson.headline,
+				linkedin_url: window.location.href.split("?")[0],
+				location: voyagerJson.locationName,
+				skills: voyagerJson.skills?.map(s => s.name).filter(Boolean),
+				work_experience: voyagerJson.experience?.map(exp => ({
+					title: exp.title,
+					company: exp.companyName,
+					date_from: exp.timePeriod?.startDate,
+					date_to: exp.timePeriod?.endDate,
+					location: exp.locationName,
+					description: exp.description
+				})),
+				education: voyagerJson.education?.map(edu => ({
+					institution: edu.schoolName,
+					degree: edu.degreeName,
+					date_from: edu.timePeriod?.startDate,
+					date_to: edu.timePeriod?.endDate
+				})),
+				languages: voyagerJson.languages?.map(l => ({
+					language: l.name,
+					proficiency: l.proficiency
+				})),
+				english_level: (() => {
+					const eng = voyagerJson.languages?.find(l => /english|inglés/i.test(l.name));
+					return eng ? eng.proficiency : undefined;
+				})(),
+				alternative_cv: voyagerJson.website,
+			};
+		}
+
+		// Si el JSON no está disponible o faltan campos clave, usar el DOM como respaldo
+		if (!candidate.name || !candidate.linkedin_url) {
+			// --- Scraping tradicional ---
+			for (const [key, extractors] of Object.entries(fieldExtractors)) {
+				for (const extractor of extractors) {
+					const value = extractor();
+					if (value) {
+						candidate[key] = value;
+						break;
+					}
+				}
 			}
 		}
-	}
 
-	if (!candidate.name) {
-		console.warn("[Ally] Waiting for profile name before scraping", window.location.pathname);
-		return undefined;
-	}
+		// Resto del pipeline tradicional
+		if (!candidate.name) {
+			console.warn("[Ally] Waiting for profile name before scraping", window.location.pathname);
+			return undefined;
+		}
+		highlightName();
+		if (candidate.linkedin_url) {
+			candidate.linkedin_url = candidate.linkedin_url.split("?")[0];
+			highlightLinkedInUrl(candidate.linkedin_url);
+		}
+		const lastName = deriveLastName(candidate.name);
+		if (lastName) {
+			candidate.last_name = lastName;
+		}
+		if (candidate.location) {
+			candidate.place_of_residency = candidate.location;
+		}
 
-	highlightName();
+		// Smart scroller si faltan secciones
+		const experienceReady = ensureSectionReady("experience");
+		const educationReady = ensureSectionReady("education");
+		ensureSectionReady("languages");
+		
+		console.log("[Ally] Section status - experience:", experienceReady, "education:", educationReady);
+		
+		if (!areRequiredSectionsReady()) {
+			console.log("[Ally] Sections not ready, scrolling...");
+			await smartScroller();
+			// Reintenta tras scroll
+			return await gatherCandidate();
+		}
 
-	if (candidate.linkedin_url) {
-		candidate.linkedin_url = candidate.linkedin_url.split("?")[0];
-		highlightLinkedInUrl(candidate.linkedin_url);
-	}
+		const portfolio = extractPortfolioLink();
+		if (portfolio) {
+			candidate.alternative_cv = portfolio;
+		}
+		
+		console.log("[Ally] Attempting to extract work_experience. experienceReady:", experienceReady);
+		if (experienceReady && (!candidate.work_experience || candidate.work_experience.length === 0)) {
+			const experiences = extractWorkExperience();
+			console.log("[Ally] Extracted", experiences.length, "work experiences");
+			if (experiences.length > 0) {
+				candidate.work_experience = experiences;
+			}
+		} else {
+			console.log("[Ally] Skipping work_experience extraction. Ready:", experienceReady, "Already has:", candidate.work_experience?.length || 0);
+		}
+		
+		console.log("[Ally] Attempting to extract education. educationReady:", educationReady);
+		if (educationReady && (!candidate.education || candidate.education.length === 0)) {
+			const education = extractEducation();
+			console.log("[Ally] Extracted", education.length, "education entries");
+			if (education.length > 0) {
+				candidate.education = education;
+			}
+		} else {
+			console.log("[Ally] Skipping education extraction. Ready:", educationReady, "Already has:", candidate.education?.length || 0);
+		}
+		if (!candidate.english_level) {
+			const englishLevel = extractEnglishLevel();
+			if (englishLevel) {
+				candidate.english_level = englishLevel;
+			}
+		}
 
-	const lastName = deriveLastName(candidate.name);
-	if (lastName) {
-		candidate.last_name = lastName;
-	}
+		// Validación final de esquema CandidatePayload (ajusta según tu backend)
+		// ...aquí podrías normalizar campos, limpiar arrays vacíos, etc...
 
-	if (candidate.location) {
-		candidate.place_of_residency = candidate.location;
-	}
-
-	const experienceReady = ensureSectionReady("experience");
-	const educationReady = ensureSectionReady("education");
-	ensureSectionReady("languages");
-
-	if (!areRequiredSectionsReady()) {
-		console.debug("[Ally] Waiting for lazy sections to load", {
-			experienceReady,
-			educationReady
-		});
-		return undefined;
-	}
-
-	const portfolio = extractPortfolioLink();
-	if (portfolio) {
-		candidate.alternative_cv = portfolio;
-	}
-
-	if (experienceReady) {
-		const experiences = extractWorkExperience();
-		if (experiences.length > 0) {
-			candidate.work_experience = experiences;
+		console.log("[Ally] Candidate scraped", candidate);
+		return candidate;
+	})();
+// --- Smart Scroller: simula scroll humano para lazy loading ---
+async function smartScroller() {
+	let lastHeight = 0;
+	let sameCount = 0;
+	for (let i = 0; i < 20; i++) {
+		window.scrollBy({ top: 200 + Math.random() * 200, behavior: 'smooth' });
+		await randomJitter(300, 800);
+		const h = document.body.scrollHeight;
+		if (h === lastHeight) {
+			sameCount++;
+			if (sameCount > 3) break;
+		} else {
+			sameCount = 0;
+			lastHeight = h;
 		}
 	}
-
-	if (educationReady) {
-		const education = extractEducation();
-		if (education.length > 0) {
-			candidate.education = education;
-		}
-	}
-
-	const englishLevel = extractEnglishLevel();
-	if (englishLevel) {
-		candidate.english_level = englishLevel;
-	}
-
-	if (!experienceReady || !educationReady) {
-		console.debug("[Ally] Proceeding without optional sections", {
-			experienceReady,
-			educationReady
-		});
-	}
-
-	console.log("[Ally] Candidate scraped", candidate);
-	return candidate;
+	window.scrollTo({ top: 0, behavior: 'smooth' });
+}
 }
 
 function highlightLinkedInUrl(url) {
@@ -617,7 +737,7 @@ function sendCandidate(candidate) {
 	}
 }
 
-function processProfile() {
+async function processProfile() {
 	if (!document || !document.body) {
 		return;
 	}
@@ -645,7 +765,7 @@ function processProfile() {
 		return;
 	}
 
-	const candidate = gatherCandidate();
+	const candidate = await gatherCandidate();
 	if (!candidate) {
 		console.debug("[Ally] Candidate data incomplete", canonicalProfilePath);
 		return;

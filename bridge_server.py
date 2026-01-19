@@ -90,6 +90,7 @@ async def _flush_queue_locked() -> None:
     global total_queue_length
 
     if total_queue_length == 0:
+        LOG.debug("[Bridge] Flush solicitado pero la cola está vacía")
         return
 
     pending: Dict[QueueKey, List[Dict[str, Any]]] = {
@@ -103,6 +104,7 @@ async def _flush_queue_locked() -> None:
     for key in list(candidate_queues.keys()):
         candidate_queues[key].clear()
 
+    LOG.info("[Bridge] Cola de candidatos limpiada tras flush")
     total_queue_length = 0
 
     for key, candidates in pending.items():
@@ -113,11 +115,19 @@ async def _flush_queue_locked() -> None:
         total_batches = (len(candidates) + BATCH_SIZE - 1) // BATCH_SIZE
         batch_index = 0
 
+        LOG.info("[Bridge] Flusheando %d candidatos para agency %s (creado por %s) en %d batches", len(candidates), agency_id, created_by, total_batches)
+
         while batch_index < total_batches:
             start = batch_index * BATCH_SIZE
             end = min(start + BATCH_SIZE, len(candidates))
-            batch_payload = [deepcopy(item) for item in candidates[start:end]]
+            # Transformar cada candidato al formato de Supabase
+            batch_payload = [_transform_candidate_for_supabase(deepcopy(item)) for item in candidates[start:end]]
+            
+            # Log de TODOS los objetos transformados para debugging
+            for idx, transformed in enumerate(batch_payload):
+                LOG.info("[Bridge] Candidato #%d transformado: %s", idx + 1, transformed)
 
+            LOG.info("[Bridge] Enviando batch %d/%d a Supabase para agency %s", batch_index + 1, total_batches, agency_id)
             success, response = await asyncio.to_thread(
                 send_batch_to_api,
                 batch_payload,
@@ -130,7 +140,7 @@ async def _flush_queue_locked() -> None:
             if not success:
                 status_detail = response.status_code if response else "no response"
                 LOG.error(
-                    "Batch %s for agency %s failed with status %s",
+                    "[Bridge] Batch %s para agency %s falló con status %s",
                     batch_index + 1,
                     agency_id,
                     status_detail,
@@ -138,11 +148,14 @@ async def _flush_queue_locked() -> None:
                 _requeue_pending_batches(pending, key, start)
                 raise RuntimeError("Supabase delivery failed")
 
+            LOG.info("[Bridge] Batch %d/%d enviado correctamente", batch_index + 1, total_batches)
+
             if batch_index + 1 < total_batches:
                 await asyncio.sleep(WAIT_TIME_MS / 1000.0)
 
             batch_index += 1
 
+        LOG.info("[Bridge] Todos los batches enviados para agency %s", agency_id)
         pending[key] = []
 
 
@@ -158,6 +171,8 @@ async def periodic_flush_worker() -> None:
     """Background task that flushes queued candidates at intervals."""
     while True:
         await asyncio.sleep(FLUSH_INTERVAL_SECONDS)
+        if total_queue_length == 0:
+            continue
         await _flush_queue_if_needed()
 
 
@@ -173,15 +188,18 @@ async def receive_candidate(
     x_ally_user_id: str | None = Header(default=None),
     x_ally_agency_id: str | None = Header(default=None),
 ) -> Dict[str, str]:
+    LOG.info("[Bridge] Iniciando recepción de candidato")
     profile = await asyncio.to_thread(_resolve_supabase_profile, authorization, x_ally_user_id)
 
     agency_id = str(profile["agency_id"])
     created_by = str(profile["id"])
 
     if x_ally_agency_id and x_ally_agency_id != agency_id:
+        LOG.warning("[Bridge] Agency mismatch: header %s vs profile %s", x_ally_agency_id, agency_id)
         raise HTTPException(status_code=403, detail="agency mismatch")
 
     candidate_dict = candidate.model_dump(exclude_none=True, mode="json")
+    LOG.info("[Bridge] Validando candidato para agency_id=%s, created_by=%s", agency_id, created_by)
 
     async with queue_lock:
         global total_queue_length
@@ -189,10 +207,10 @@ async def receive_candidate(
         url_key = candidate_dict.get("linkedin_url")
         duplicate_key = (agency_id, url_key) if url_key else None
         if duplicate_key and duplicate_key in processed_urls:
-            LOG.info("Duplicate candidate ignored for %s (%s)", url_key, agency_id)
+            LOG.info("[Bridge] Candidato duplicado ignorado para %s (%s)", url_key, agency_id)
             return {"status": "ignored", "reason": "duplicate"}
 
-        LOG.info("Candidate received for agency %s: %s", agency_id, candidate_dict)
+        LOG.info("[Bridge] Candidato recibido para agency %s: %s", agency_id, candidate_dict)
         key = (agency_id, created_by)
         candidate_queues[key].append(candidate_dict)
         total_queue_length += 1
@@ -200,15 +218,18 @@ async def receive_candidate(
         if duplicate_key:
             processed_urls.add(duplicate_key)
 
-        LOG.info("Candidate buffered. Queue length: %s", total_queue_length)
+        LOG.info("[Bridge] Candidato bufferizado. Largo de la cola: %s", total_queue_length)
 
         if total_queue_length >= BATCH_SIZE:
+            LOG.info("[Bridge] Se alcanzó el tamaño de batch. Flusheando candidatos...")
             try:
                 await _flush_queue_locked()
+                LOG.info("[Bridge] Flush inmediato exitoso")
             except RuntimeError as exc:
-                LOG.exception("Immediate flush failed")
+                LOG.exception("[Bridge] Error en flush inmediato")
                 raise HTTPException(status_code=502, detail=str(exc))
 
+    LOG.info("[Bridge] Candidato aceptado y encolado. Total en cola: %s", total_queue_length)
     return {"status": "accepted", "queued": str(total_queue_length)}
 
 
@@ -227,6 +248,106 @@ async def bridge_config(
         "agency_id": str(profile["agency_id"]),
         "created_by": str(profile["id"])
     }
+
+
+def _transform_candidate_for_supabase(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """Transforma el candidato al formato esperado por Supabase."""
+    transformed = {}
+    
+    # Nombre completo y apellido
+    if "name" in candidate:
+        transformed["name"] = candidate["name"]
+    
+    # Apellido (requerido): usar last_name o extraer del nombre completo
+    if "last_name" in candidate:
+        transformed["lastname"] = candidate["last_name"]
+    elif "name" in candidate:
+        parts = candidate["name"].split()
+        transformed["lastname"] = parts[-1] if len(parts) > 1 else candidate["name"]
+    else:
+        transformed["lastname"] = "N/A"
+    
+    # Email (opcional)
+    if "email" in candidate:
+        transformed["email"] = candidate["email"]
+    
+    # Teléfono (requerido)
+    transformed["phone"] = candidate.get("phone", "N/A")
+    
+    # Lugar de residencia (requerido)
+    transformed["place_of_residency"] = (
+        candidate.get("place_of_residency") or 
+        candidate.get("location") or 
+        "N/A"
+    )
+    
+    # LinkedIn URL (opcional)
+    if "linkedin_url" in candidate:
+        transformed["linkedin_url"] = candidate["linkedin_url"]
+    
+    # Portfolio alternativo (opcional)
+    if "alternative_cv" in candidate:
+        transformed["alternative_cv_portfolio"] = candidate["alternative_cv"]
+    
+    # Work Experience (requerido como JSONB)
+    work_exp = candidate.get("work_experience", [])
+    if work_exp and isinstance(work_exp, list):
+        # Transformar al formato esperado
+        transformed["work_experience"] = [
+            {
+                "title": exp.get("title", ""),
+                "company": exp.get("company", ""),
+                "date_from": exp.get("date_from", ""),
+                "date_to": exp.get("date_to", ""),
+                "description": exp.get("description", "")
+            }
+            for exp in work_exp
+        ]
+    else:
+        transformed["work_experience"] = []
+    
+    # Education (requerido como TEXT): convertir array a string
+    education = candidate.get("education", [])
+    if education and isinstance(education, list):
+        edu_strings = []
+        for edu in education:
+            parts = []
+            if edu.get("degree"):
+                parts.append(edu["degree"])
+            if edu.get("institution"):
+                parts.append(edu["institution"])
+            if edu.get("date_from") or edu.get("date_to"):
+                date_range = f"{edu.get('date_from', '')} - {edu.get('date_to', '')}".strip(" -")
+                if date_range:
+                    parts.append(f"({date_range})")
+            if parts:
+                edu_strings.append(" - ".join(parts))
+        transformed["education"] = " | ".join(edu_strings) if edu_strings else "N/A"
+    else:
+        transformed["education"] = education if isinstance(education, str) else "N/A"
+    
+    # Nivel de inglés (con default)
+    english_level = candidate.get("english_level", "").lower()
+    valid_levels = ["basic", "intermediate", "advanced", "native"]
+    if english_level in valid_levels:
+        transformed["level_of_english"] = english_level
+    else:
+        transformed["level_of_english"] = "intermediate"  # Default
+    
+    # Main skills (opcional, array)
+    if "main_skills" in candidate:
+        transformed["main_skills"] = candidate["main_skills"]
+    
+    # Salary expectation (opcional)
+    if "salary_expectation" in candidate:
+        transformed["salary_expectation"] = candidate["salary_expectation"]
+    
+    # Otros datos relevantes (opcional): usar el role como fallback
+    other_data = candidate.get("other_relevant_data") or candidate.get("role")
+    if other_data:
+        transformed["other_relevant_data"] = other_data
+    
+    return transformed
 
 
 def _requeue_pending_batches(
