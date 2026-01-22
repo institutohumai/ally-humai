@@ -9,7 +9,7 @@ const PENDING_QUEUE_KEY = "ally:pending-candidates";
 const MAX_QUEUE_SIZE = 50;
 
 // Logging helpers for consistent context
-const LOG_PREFIX = "[ServiceWorker]";
+const LOG_PREFIX = "[Ally]";
 const log = {
   info: (...args) => console.log(LOG_PREFIX, ...args),
   warn: (...args) => console.warn(LOG_PREFIX, ...args),
@@ -21,6 +21,99 @@ let configPromise = null;
 let session = null;
 let isProcessingQueue = false;
 let lastSentLinkedIn = null;
+
+// Ensure payloads carry the origin of this extension
+function withSource(payload) {
+  return { ...payload, source: "linkedin_extension" };
+}
+
+// Reinyecta el content script de Lovable en pestañas abiertas tras recargar la extensión
+function reinjectLovableContentScripts() {
+  const lovableUrls = [
+    "https://preview--grow-agency-pro.lovable.app/*",
+    "https://grow-agency-pro.lovable.app/*"
+  ];
+  chrome.tabs.query({ url: lovableUrls }, (tabs) => {
+    tabs.forEach((tab) => {
+      chrome.scripting.executeScript(
+        {
+          target: { tabId: tab.id, allFrames: true },
+          files: ["content-script-lovable.js"]
+        },
+        () => {
+          const lastError = chrome.runtime.lastError;
+          if (lastError) {
+            log.warn("No pudimos reinyectar script en pestaña Lovable", { tabId: tab.id, error: lastError.message });
+          } else {
+            log.info("Content script reinjectado en pestaña Lovable", { tabId: tab.id });
+          }
+        }
+      );
+    });
+  });
+}
+
+function reinjectLinkedInContentScripts() {
+  const linkedinUrls = [
+    "https://www.linkedin.com/*",
+    "https://linkedin.com/*"
+  ];
+  chrome.tabs.query({ url: linkedinUrls }, (tabs) => {
+    tabs.forEach((tab) => {
+      chrome.scripting.executeScript(
+        {
+          target: { tabId: tab.id, allFrames: true },
+          files: ["content-script-linkedin.js"]
+        },
+        () => {
+          const lastError = chrome.runtime.lastError;
+          if (lastError) {
+            log.warn("No pudimos reinyectar script en pestaña LinkedIn", { tabId: tab.id, error: lastError.message });
+          } else {
+            log.info("Content script reinjectado en pestaña LinkedIn", { tabId: tab.id });
+          }
+        }
+      );
+    });
+  });
+}
+
+// Snapshot the session state without throwing
+async function getSessionSnapshot() {
+  try {
+    const stored = await loadSessionFromStorage();
+    const current = stored || session;
+    if (!current || isSessionExpired(current)) {
+      return { active: false, userId: null };
+    }
+    return { active: true, userId: current.userId || null };
+  } catch (error) {
+    log.warn("No pudimos leer el estado de sesión para ping", String(error));
+    return { active: false, userId: null };
+  }
+}
+
+function broadcastToTabs(message) {
+  chrome.tabs.query({}, (tabs) => {
+    tabs.forEach((tab) => {
+      chrome.tabs.sendMessage(tab.id, message, () => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          // Silenciar errores típicos de tabs sin content script
+          return;
+        }
+      });
+    });
+  });
+}
+
+function notifySessionCleared() {
+  broadcastToTabs({ type: "ALLY_SESSION_CLEARED" });
+}
+
+function notifyBridgeError(detail) {
+  broadcastToTabs({ type: "ALLY_BRIDGE_ERROR", detail });
+}
 
 function isSessionExpired(sess) {
   if (!sess?.expiresAt) return false;
@@ -34,33 +127,38 @@ function isSameSession(a, b) {
 }
 
 async function handleAuthFailure(reason) {
-  log.warn("Auth failure → clearing session", { reason });
+  log.warn("La sesión dejó de ser válida; se limpiará para volver a iniciar", { reason });
   session = null;
   invalidateConfigCache();
   try {
     await clearStoredSession();
   } catch (error) {
-    log.error("Error clearing stored session after auth failure", String(error));
+    log.error("No pudimos limpiar la sesión guardada", String(error));
   }
   await updateBadge();
+  notifySessionCleared();
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
-  log.info("onInstalled → initializeExtension");
+  log.info("Extensión instalada: preparando todo");
   await initializeExtension();
+  reinjectLovableContentScripts();
+  reinjectLinkedInContentScripts();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  log.info("onStartup → initializeExtension");
+  log.info("Chrome inició: preparando Ally");
   await initializeExtension();
+  reinjectLovableContentScripts();
+  reinjectLinkedInContentScripts();
 });
 
 async function initializeExtension() {
-  log.info("initializeExtension: start");
+  log.info("Iniciando Ally...");
   await loadSessionFromStorage();
   await updateBadge();
   await processPendingQueue();
-  log.info("initializeExtension: done");
+  log.info("Ally listo");
 }
 
 async function updateBadge() {
@@ -108,7 +206,7 @@ async function addToPendingQueue(candidate) {
       chrome.storage.local.set({ [PENDING_QUEUE_KEY]: queue }, () => {
         const err = chrome.runtime.lastError;
         if (err) {
-          log.error("addToPendingQueue: storage error", err.message || err);
+          log.error("No pudimos guardar en la cola", err.message || err);
           reject(err);
         } else {
           resolve();
@@ -138,7 +236,7 @@ async function processPendingQueue() {
       return;
     }
     
-    log.info("processPendingQueue: start", { count: queue.length });
+    log.info("Revisando cola de candidatos pendientes", { enCola: queue.length });
     
     const successfulIndices = [];
     
@@ -147,26 +245,26 @@ async function processPendingQueue() {
       try {
         await postCandidate(item.candidate);
         successfulIndices.push(i);
-        log.info("Queued candidate sent", { name: item.candidate?.name });
+        log.info("Candidato pendiente enviado", { name: item.candidate?.name });
       } catch (error) {
-        log.warn("Error sending queued candidate", { name: item.candidate?.name, error: String(error) });
+        log.warn("No se pudo enviar un candidato en cola, se reintentará", { name: item.candidate?.name, error: String(error) });
         item.retries = (item.retries || 0) + 1;
         
         // Eliminar después de 3 reintentos
         if (item.retries >= 3) {
           successfulIndices.push(i);
-          log.error("Candidate dropped after 3 retries", { name: item.candidate?.name });
+          log.error("Se descartó un candidato tras 3 intentos", { name: item.candidate?.name });
         }
       }
     }
     
-    // Remover candidatos exitosos de la cola
-    if (successfulIndices.length > 0) {
-      const newQueue = queue.filter((_, index) => !successfulIndices.includes(index));
-      await new Promise((resolve) => {
-        chrome.storage.local.set({ [PENDING_QUEUE_KEY]: newQueue }, resolve);
-      });
-    }
+    // Persistir la cola para conservar retries y descartar éxitos
+    const newQueue = successfulIndices.length > 0
+      ? queue.filter((_, index) => !successfulIndices.includes(index))
+      : queue;
+    await new Promise((resolve) => {
+      chrome.storage.local.set({ [PENDING_QUEUE_KEY]: newQueue }, resolve);
+    });
     
   } finally {
     isProcessingQueue = false;
@@ -179,14 +277,14 @@ async function loadSessionFromStorage() {
     chrome.storage.local.get([SESSION_STORAGE_KEY], (result) => {
       const lastError = chrome.runtime.lastError;
       if (lastError) {
-        log.error("loadSessionFromStorage: error", lastError.message || lastError);
+        log.error("No pudimos leer la sesión guardada", lastError.message || lastError);
         reject(lastError);
         return;
       }
       const stored = result?.[SESSION_STORAGE_KEY] || null;
       if (stored && stored.accessToken && stored.userId) {
         if (isSessionExpired(stored)) {
-          log.warn("loadSessionFromStorage: expired session, clearing", { userId: stored.userId });
+          log.warn("La sesión guardada venció; se limpia para volver a iniciar", { userId: stored.userId });
           chrome.storage.local.remove([SESSION_STORAGE_KEY], () => {
             session = null;
             resolve(null);
@@ -208,10 +306,10 @@ async function persistSession(newSession) {
     chrome.storage.local.set({ [SESSION_STORAGE_KEY]: newSession }, () => {
       const lastError = chrome.runtime.lastError;
       if (lastError) {
-        log.error("persistSession: error", lastError.message || lastError);
+        log.error("No pudimos guardar la sesión", lastError.message || lastError);
         reject(lastError);
       } else {
-        log.info("persistSession: stored", { userId: newSession?.userId });
+        log.info("Sesión guardada", { userId: newSession?.userId });
         resolve();
       }
     });
@@ -223,7 +321,7 @@ async function clearStoredSession() {
     chrome.storage.local.remove([SESSION_STORAGE_KEY], () => {
       const lastError = chrome.runtime.lastError;
       if (lastError) {
-        log.error("clearStoredSession: error", lastError.message || lastError);
+        log.error("No pudimos borrar la sesión", lastError.message || lastError);
         reject(lastError);
       } else {
         resolve();
@@ -235,7 +333,7 @@ async function clearStoredSession() {
 function invalidateConfigCache() {
   cachedConfig = null;
   configPromise = null;
-  log.info("Config cache invalidated");
+  log.info("Configuración se recargará la próxima vez");
 }
 
 async function ensureSession() {
@@ -243,13 +341,13 @@ async function ensureSession() {
   const stored = await loadSessionFromStorage();
   if (stored && stored.accessToken && stored.userId) {
     if (isSessionExpired(stored)) {
-      log.warn("ensureSession: session expired");
+      log.warn("Tu sesión expiró; vuelve a iniciar en la app");
       await handleAuthFailure("session expired");
       throw new Error("Sesión de Supabase expirada");
     }
     return stored;
   }
-  log.warn("ensureSession: missing Supabase session");
+  log.warn("No hay sesión activa; inicia sesión en la app");
   throw new Error("Sesión de Supabase no configurada");
 }
 
@@ -287,7 +385,7 @@ async function ensureBridgeConfig() {
         return cachedConfig;
       })
       .catch((error) => {
-        log.warn("ensureBridgeConfig: failed", String(error));
+        log.warn("No pudimos leer la configuración del bridge", String(error));
         invalidateConfigCache();
         throw error;
       });
@@ -297,7 +395,8 @@ async function ensureBridgeConfig() {
 }
 
 async function postCandidate(payload) {
-  log.info("postCandidate: sending", { name: payload?.name, linkedin_url: payload?.linkedin_url });
+  const body = withSource(payload);
+  log.info("Enviando candidato al bridge", { name: body?.name, linkedin_url: body?.linkedin_url, source: body?.source });
   const [config, currentSession] = await Promise.all([
     ensureBridgeConfig(),
     ensureSession()
@@ -313,29 +412,44 @@ async function postCandidate(payload) {
     headers["X-Ally-User-Id"] = currentSession.userId;
   }
 
-  const response = await fetch(API_ENDPOINT, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload)
-  });
+  let response;
+  try {
+    response = await fetch(API_ENDPOINT, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body)
+    });
+  } catch (error) {
+    notifyBridgeError(error?.message || String(error));
+    throw error;
+  }
 
   if (!response.ok) {
     const detail = await response.text();
     if (response.status === 401 || response.status === 403) {
       await handleAuthFailure(`candidates ${response.status}`);
     }
-    log.warn("postCandidate: bridge error", { status: response.status, detail });
+    log.warn("El bridge respondió con error", { status: response.status, detail });
+    notifyBridgeError(detail || `status ${response.status}`);
     throw new Error(detail || `status ${response.status}`);
   }
-  log.info("postCandidate: candidate sent");
+  log.info("Candidato enviado con éxito");
 
   // Record last sent LinkedIn URL to prevent immediate duplicates
-  if (payload?.linkedin_url) {
-    lastSentLinkedIn = payload.linkedin_url;
+  if (body?.linkedin_url) {
+    lastSentLinkedIn = body.linkedin_url;
   }
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "ALLY_PING") {
+    (async () => {
+      const snapshot = await getSessionSnapshot();
+      sendResponse({ ok: true, active: snapshot.active, userId: snapshot.userId || null });
+    })();
+    return true;
+  }
+
   if (message?.type === "ALLY_SUPABASE_SESSION") {
     (async () => {
       try {
@@ -355,7 +469,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
 
-        log.info("Session update received", { hasAccessToken: Boolean(accessToken), userId });
+        log.info("Sesión recibida desde la app", { hasAccessToken: Boolean(accessToken), userId });
         session = newSession;
         await persistSession(session);
         invalidateConfigCache();
@@ -363,7 +477,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await processPendingQueue();
         sendResponse({ ok: true });
       } catch (error) {
-        log.error("Session update invalid", String(error));
+        log.error("La sesión recibida no es válida", String(error));
         sendResponse({ ok: false, detail: String(error) });
       }
     })();
@@ -373,14 +487,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "ALLY_CLEAR_SESSION") {
     (async () => {
       try {
-        log.info("Session clearing requested");
+        log.info("Se pidió cerrar sesión");
         session = null;
         invalidateConfigCache();
         await clearStoredSession();
         await updateBadge();
+        notifySessionCleared();
         sendResponse({ ok: true });
       } catch (error) {
-        log.error("Error clearing session", String(error));
+        log.error("No pudimos cerrar sesión", String(error));
         sendResponse({ ok: false, detail: String(error) });
       }
     })();
@@ -393,11 +508,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   (async () => {
     try {
-      log.info("Candidate received", { name: message.payload?.name, linkedin_url: message.payload?.linkedin_url });
+      log.info("Nuevo candidato recibido desde LinkedIn", { name: message.payload?.name, linkedin_url: message.payload?.linkedin_url });
 
       // Deduplicate immediate repeats by linkedin_url
       if (message.payload?.linkedin_url && message.payload.linkedin_url === lastSentLinkedIn) {
-        log.info("Candidate skipped (duplicate linkedin_url)", { linkedin_url: message.payload.linkedin_url });
+        log.info("Candidato omitido: ya se envió este perfil recientemente", { linkedin_url: message.payload.linkedin_url });
         sendResponse({ ok: true, skipped: true, reason: "duplicate_linkedin_url" });
         return;
       }
@@ -405,25 +520,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Intentar enviar inmediatamente si hay sesión
       if (session) {
         try {
-          await postCandidate(message.payload);
+          await postCandidate(withSource(message.payload));
           await updateBadge();
-          log.info("Candidate sent immediately");
+          log.info("Candidato enviado al momento");
           sendResponse({ ok: true, sent: true });
           return;
         } catch (error) {
-          log.warn("Immediate send failed, queuing", { error: error.message });
+          log.warn("No se pudo enviar ahora; se guardará para reintentar", { error: error.message });
           // Si falla, agregar a cola
         }
       }
       
       // Si no hay sesión o falló el envío, agregar a cola
-      await addToPendingQueue(message.payload);
+      await addToPendingQueue(withSource(message.payload));
       await updateBadge();
-      log.info("Candidate queued for later send");
+      log.info("Candidato guardado para enviar después");
       sendResponse({ ok: true, queued: true });
       
     } catch (error) {
-      log.error("Error processing candidate", String(error));
+      log.error("Tuvimos un problema procesando el candidato", String(error));
       const detail = error instanceof Error ? error.message : String(error);
       sendResponse({ ok: false, detail });
     }

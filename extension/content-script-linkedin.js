@@ -539,7 +539,13 @@ function gatherCandidate() {
 		let voyagerJson = null;
 		const profileId = getProfileIdFromUrl();
 		if (profileId) {
+			console.log("[Ally] Pidiendo perfil Voyager para", profileId);
 			voyagerJson = await getVoyagerProfileJson(profileId);
+			if (voyagerJson) {
+				console.log("[Ally] Perfil Voyager recibido; usando datos de la API", { profileId });
+			} else {
+				console.log("[Ally] Voyager no disponible; se usará scrape del DOM", { profileId });
+			}
 		}
 		let candidate = {};
 		if (voyagerJson) {
@@ -578,6 +584,7 @@ function gatherCandidate() {
 
 		// Si el JSON no está disponible o faltan campos clave, usar el DOM como respaldo
 		if (!candidate.name || !candidate.linkedin_url) {
+			console.log("[Ally] Complementando candidato con scrape del DOM");
 			// --- Scraping tradicional ---
 			for (const [key, extractors] of Object.entries(fieldExtractors)) {
 				for (const extractor of extractors) {
