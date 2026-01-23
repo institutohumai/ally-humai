@@ -80,7 +80,7 @@ class CandidatePayload(BaseModel):
     alternative_cv: Optional[HttpUrl] = None
     work_experience: Optional[List[ExperiencePayload]] = None
     education: Optional[List[EducationPayload]] = None
-    english_level: Optional[str] = None
+    level_of_english: Optional[str] = None  # Updated field name
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -188,7 +188,7 @@ async def receive_candidate(
     x_ally_user_id: str | None = Header(default=None),
     x_ally_agency_id: str | None = Header(default=None),
 ) -> Dict[str, str]:
-    LOG.info("[Bridge] Iniciando recepción de candidato")
+    LOG.info("[Bridge] Payload recibido: %s", candidate.model_dump(exclude_none=True, mode="json"))
     profile = await asyncio.to_thread(_resolve_supabase_profile, authorization, x_ally_user_id)
 
     agency_id = str(profile["agency_id"])
@@ -326,27 +326,29 @@ def _transform_candidate_for_supabase(candidate: Dict[str, Any]) -> Dict[str, An
     else:
         transformed["education"] = education if isinstance(education, str) else "N/A"
     
-    # Nivel de inglés (con default)
-    english_level = candidate.get("english_level", "").lower()
-    valid_levels = ["basic", "intermediate", "advanced", "native"]
-    if english_level in valid_levels:
-        transformed["level_of_english"] = english_level
-    else:
-        transformed["level_of_english"] = "intermediate"  # Default
+    # Nivel de inglés (mapeo de valores de LinkedIn a valores aceptados)
+    english_level_map = {
+        "competencia básica": "basic",
+        "competencia básica limitada": "basic",
+        "competencia básica profesional": "intermediate",
+        "competencia profesional completa": "advanced",
+        "competencia bilingüe o nativa": "native"
+    }
+
+    english_level = candidate.get("level_of_english", "").strip().lower()
+    LOG.info("[Bridge] Nivel de inglés recibido: '%s'", english_level)
+
+    transformed["level_of_english"] = english_level_map.get(english_level, "")
+
     
     # Main skills (opcional, array)
-    if "main_skills" in candidate:
-        transformed["main_skills"] = candidate["main_skills"]
-    
-    # Salary expectation (opcional)
-    if "salary_expectation" in candidate:
-        transformed["salary_expectation"] = candidate["salary_expectation"]
-    
-    # Otros datos relevantes (opcional): usar el role como fallback
-    other_data = candidate.get("other_relevant_data") or candidate.get("role")
-    if other_data:
-        transformed["other_relevant_data"] = other_data
-    
+    if "skills" in candidate:
+        transformed["main_skills"] = candidate["skills"]
+
+    # Certifications (opcional, array)
+    if "certifications" in candidate:
+        transformed["certifications"] = candidate["certifications"]
+
     return transformed
 
 
