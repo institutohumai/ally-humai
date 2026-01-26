@@ -243,6 +243,13 @@ function getVoyagerProfileJson(profileId) {
 
 function sendCandidate(candidate) {
   if (!candidate || !candidate.name) return;
+
+  // Validar si el contexto de la extensión está disponible
+  if (!chrome.runtime || !chrome.runtime.sendMessage) {
+    console.error("[Ally] Error: Contexto de la extensión no disponible.");
+    return;
+  }
+
   try {
     chrome.runtime.sendMessage(
       { type: "ALLY_CANDIDATE", payload: candidate },
@@ -273,31 +280,31 @@ async function gatherAndSend() {
   // 1. Extracción DOM Base
   let candidate = await executeExtractors(topCard);
 
-  // 2. Enriquecimiento con API Voyager
-  const profileId = getProfileIdFromUrl();
-  if (profileId) {
-    const voyagerData = await getVoyagerProfileJson(profileId);
-    if (voyagerData) {
-      console.log("[Ally] Fusionando datos de Voyager...");
+  // 2. Enriquecimiento con API Voyager (Comentado)
+  // const profileId = getProfileIdFromUrl();
+  // if (profileId) {
+  //   const voyagerData = await getVoyagerProfileJson(profileId);
+  //   if (voyagerData) {
+  //     console.log("[Ally] Fusionando datos de Voyager...");
 
-      // Buscar nivel de inglés en Voyager
-      const voyagerEnglish = voyagerData.languages?.find((l) =>
-        /english|inglés|ingles/i.test(l.name),
-      );
+  //     // Buscar nivel de inglés en Voyager
+  //     const voyagerEnglish = voyagerData.languages?.find((l) =>
+  //       /english|inglés|ingles|Inglés|English/i.test(l.name),
+  //     );
 
-      candidate = {
-        ...candidate,
-        headline: voyagerData.headline || candidate.role,
-        location: voyagerData.locationName || candidate.location,
-        alternative_cv: voyagerData.website,
-        skills: voyagerData.skills?.map((s) => s.name).filter(Boolean),
-        about: voyagerData.summary,
-        level_of_english: voyagerEnglish
-          ? voyagerEnglish.proficiency
-          : undefined,
-      };
-    }
-  }
+  //     candidate = {
+  //       ...candidate,
+  //       headline: voyagerData.headline || candidate.role,
+  //       location: voyagerData.locationName || candidate.location,
+  //       alternative_cv: voyagerData.website,
+  //       skills: voyagerData.skills?.map((s) => s.name).filter(Boolean),
+  //       about: voyagerData.summary,
+  //       level_of_english: voyagerEnglish
+  //         ? voyagerEnglish.proficiency
+  //         : undefined,
+  //     };
+  //   }
+  // }
 
   // 3. Scroll y Listas
   await humanScrollAndExpand();
@@ -306,7 +313,9 @@ async function gatherAndSend() {
   candidate.work_experience = extractListSection("experience", {
     title: ".t-bold span[aria-hidden='true']",
     company: ".t-14.t-normal span[aria-hidden='true']",
-    description: ".inline-show-more-text",
+    description: ".wOLGhQneMtuPCjjutWcjeQtdvnOeYMaMhs", // Selector para la descripción
+    date_from: ".t-14.t-normal.t-black--light span[aria-hidden='true']:nth-of-type(1)", // Selector para la fecha de inicio
+    date_to: ".t-14.t-normal.t-black--light span[aria-hidden='true']:nth-of-type(2)", // Selector para la fecha de fin
   });
 
   // Educación
@@ -359,7 +368,7 @@ async function gatherAndSend() {
     const aboutSection = aboutAnchor.closest("section");
     if (aboutSection) {
       const aboutTextEl = aboutSection.querySelector(
-        ".inline-show-more-text, .pv-shared-text-with-see-more",
+        ".wOLGhQneMtuPCjjutWcjeQtdvnOeYMaMhs",
       );
       if (aboutTextEl) {
         const text = cleanString(aboutTextEl.innerText);
@@ -392,6 +401,10 @@ async function processProfile() {
 
     if (candidate && candidate.name) {
       sessionStorage.setItem("ally:lastSent", canonicalPath);
+      // Asegurar que 'level_of_english' se envíe aunque esté vacío
+      if (!candidate.level_of_english) {
+        candidate.level_of_english = "";
+      }
       sendCandidate(candidate);
     }
   } catch (error) {

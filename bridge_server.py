@@ -4,7 +4,6 @@ and forwards them in batches to the Supabase import endpoint.
 
 import asyncio
 from collections import defaultdict
-from copy import deepcopy
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -85,100 +84,9 @@ class CandidatePayload(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
 
-async def _flush_queue_locked() -> None:
-    """Flush the buffered candidates to Supabase in batches."""
-    global total_queue_length
-
-    if total_queue_length == 0:
-        LOG.debug("[Bridge] Flush solicitado pero la cola está vacía")
-        return
-
-    pending: Dict[QueueKey, List[Dict[str, Any]]] = {
-        key: entries.copy() for key, entries in candidate_queues.items() if entries
-    }
-
-    if not pending:
-        total_queue_length = 0
-        return
-
-    for key in list(candidate_queues.keys()):
-        candidate_queues[key].clear()
-
-    LOG.info("[Bridge] Cola de candidatos limpiada tras flush")
-    total_queue_length = 0
-
-    for key, candidates in pending.items():
-        if not candidates:
-            continue
-
-        agency_id, created_by = key
-        total_batches = (len(candidates) + BATCH_SIZE - 1) // BATCH_SIZE
-        batch_index = 0
-
-        LOG.info("[Bridge] Flusheando %d candidatos para agency %s (creado por %s) en %d batches", len(candidates), agency_id, created_by, total_batches)
-
-        while batch_index < total_batches:
-            start = batch_index * BATCH_SIZE
-            end = min(start + BATCH_SIZE, len(candidates))
-            # Transformar cada candidato al formato de Supabase
-            batch_payload = [_transform_candidate_for_supabase(deepcopy(item)) for item in candidates[start:end]]
-            
-            # Log de TODOS los objetos transformados para debugging
-            for idx, transformed in enumerate(batch_payload):
-                LOG.info("[Bridge] Candidato #%d transformado: %s", idx + 1, transformed)
-
-            LOG.info("[Bridge] Enviando batch %d/%d a Supabase para agency %s", batch_index + 1, total_batches, agency_id)
-            success, response = await asyncio.to_thread(
-                send_batch_to_api,
-                batch_payload,
-                batch_index + 1,
-                total_batches,
-                agency_id,
-                created_by,
-            )
-
-            if not success:
-                status_detail = response.status_code if response else "no response"
-                LOG.error(
-                    "[Bridge] Batch %s para agency %s falló con status %s",
-                    batch_index + 1,
-                    agency_id,
-                    status_detail,
-                )
-                _requeue_pending_batches(pending, key, start)
-                raise RuntimeError("Supabase delivery failed")
-
-            LOG.info("[Bridge] Batch %d/%d enviado correctamente", batch_index + 1, total_batches)
-
-            if batch_index + 1 < total_batches:
-                await asyncio.sleep(WAIT_TIME_MS / 1000.0)
-
-            batch_index += 1
-
-        LOG.info("[Bridge] Todos los batches enviados para agency %s", agency_id)
-        pending[key] = []
-
-
-async def _flush_queue_if_needed() -> None:
-    async with queue_lock:
-        try:
-            await _flush_queue_locked()
-        except RuntimeError:
-            LOG.exception("Deferred flush failed")
-
-
-async def periodic_flush_worker() -> None:
-    """Background task that flushes queued candidates at intervals."""
-    while True:
-        await asyncio.sleep(FLUSH_INTERVAL_SECONDS)
-        if total_queue_length == 0:
-            continue
-        await _flush_queue_if_needed()
-
-
 @app.on_event("startup")
 async def startup_event() -> None:
-    asyncio.create_task(periodic_flush_worker())
+    pass
 
 
 @app.post("/candidates", status_code=202)
@@ -201,36 +109,30 @@ async def receive_candidate(
     candidate_dict = candidate.model_dump(exclude_none=True, mode="json")
     LOG.info("[Bridge] Validando candidato para agency_id=%s, created_by=%s", agency_id, created_by)
 
-    async with queue_lock:
-        global total_queue_length
+    # Procesar el candidato directamente sin encolarlo
+    LOG.info("[Bridge] Procesando candidato directamente para agency %s", agency_id)
+    transformed_candidate = _transform_candidate_for_supabase(candidate_dict)
 
-        url_key = candidate_dict.get("linkedin_url")
-        duplicate_key = (agency_id, url_key) if url_key else None
-        if duplicate_key and duplicate_key in processed_urls:
-            LOG.info("[Bridge] Candidato duplicado ignorado para %s (%s)", url_key, agency_id)
-            return {"status": "ignored", "reason": "duplicate"}
+    success, response = await asyncio.to_thread(
+        send_batch_to_api,
+        [transformed_candidate],
+        1,
+        1,
+        agency_id,
+        created_by,
+    )
 
-        LOG.info("[Bridge] Candidato recibido para agency %s: %s", agency_id, candidate_dict)
-        key = (agency_id, created_by)
-        candidate_queues[key].append(candidate_dict)
-        total_queue_length += 1
+    if not success:
+        status_detail = response.status_code if response else "no response"
+        LOG.error(
+            "[Bridge] Envío fallido para agency %s con status %s",
+            agency_id,
+            status_detail,
+        )
+        raise HTTPException(status_code=502, detail="Supabase delivery failed")
 
-        if duplicate_key:
-            processed_urls.add(duplicate_key)
-
-        LOG.info("[Bridge] Candidato bufferizado. Largo de la cola: %s", total_queue_length)
-
-        if total_queue_length >= BATCH_SIZE:
-            LOG.info("[Bridge] Se alcanzó el tamaño de batch. Flusheando candidatos...")
-            try:
-                await _flush_queue_locked()
-                LOG.info("[Bridge] Flush inmediato exitoso")
-            except RuntimeError as exc:
-                LOG.exception("[Bridge] Error en flush inmediato")
-                raise HTTPException(status_code=502, detail=str(exc))
-
-    LOG.info("[Bridge] Candidato aceptado y encolado. Total en cola: %s", total_queue_length)
-    return {"status": "accepted", "queued": str(total_queue_length)}
+    LOG.info("[Bridge] Candidato enviado correctamente para agency %s", agency_id)
+    return {"status": "processed"}
 
 
 @app.get("/health")
@@ -350,26 +252,6 @@ def _transform_candidate_for_supabase(candidate: Dict[str, Any]) -> Dict[str, An
         transformed["certifications"] = candidate["certifications"]
 
     return transformed
-
-
-def _requeue_pending_batches(
-    pending: Dict[QueueKey, List[Dict[str, Any]]],
-    failed_key: QueueKey,
-    failed_start_index: int,
-) -> None:
-    global total_queue_length
-
-    for key, items in pending.items():
-        if key == failed_key:
-            requeue_items = items[failed_start_index:]
-        else:
-            requeue_items = items
-
-        if not requeue_items:
-            continue
-
-        candidate_queues[key].extend(requeue_items)
-        total_queue_length += len(requeue_items)
 
 
 def _resolve_supabase_profile(

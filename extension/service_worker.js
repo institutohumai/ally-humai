@@ -248,7 +248,6 @@ async function processPendingQueue() {
     });
 
     if (queue.length === 0) {
-      log.info("Cola vacía; nada que reenviar");
       isProcessingQueue = false;
       await updateBadge();
       return;
