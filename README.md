@@ -30,33 +30,50 @@ Edita `extension/manifest.json`:
 - En `host_permissions`, añade la URL pública del bridge (ej: `https://bridge.midominio.com/*`).
 - Mantén LinkedIn y la(s) URL(s) de Lovable que uses.
 
-### Uso en modo “sin empaquetar” (recomendado para clientes internos/pilotos)
-1. Asegúrate de que el bridge esté accesible (dominio público o `http://localhost:8000`).
-2. En Chrome: `chrome://extensions` → activa “Modo desarrollador”.
-3. Click en “Cargar descomprimida” y selecciona la carpeta `extension/` de este repo.
-4. Inicia sesión en la app Lovable (dominio permitido en manifest). La app enviará la sesión a la extensión; el badge cambiará:
-   - `!` rojo: sin sesión
-   - número ámbar: candidatos en cola
-   - verde (sin texto): listo
-5. Ve a un perfil de LinkedIn. El content script extrae los datos y los envía al bridge. Si no hay sesión o el envío falla, se encola y se reintenta.
-
-### Publicar en Chrome Web Store (opcional)
-- Empaqueta la carpeta `extension/` en un ZIP tras ajustar `API_BASE_URL` y `host_permissions` a producción.
-- Sube el ZIP al Developer Dashboard de Chrome Web Store y publica. Esto habilita actualizaciones automáticas para usuarios finales.
-
 ## 3) Flujo de datos
 1. El usuario inicia sesión en Lovable → el content script `content-script-lovable.js` envía la sesión al service worker.
 2. En LinkedIn, `content-script-linkedin.js` extrae el perfil y manda un mensaje al service worker.
 3. El service worker llama al bridge (`/config` para agency_id/created_by y `/candidates` para enviar el payload). Si falla, guarda en cola y reintenta.
 
-## 4) Checklist rápida para producción
-- [ ] Bridge desplegado con HTTPS y env vars (`SUPABASE_URL`, `SUPABASE_ANON_KEY`) configuradas.
-- [ ] `API_BASE_URL` en `extension/service_worker.js` apunta al dominio público del bridge.
-- [ ] `host_permissions` en `extension/manifest.json` incluyen el dominio del bridge y los dominios de Lovable que uses.
-- [ ] Probar login en Lovable, luego abrir LinkedIn y verificar que llegan candidatos a Supabase.
+### Guía paso a paso: Cómo actualizar bridge_server en producción
+🎯 Cuando quieras hacer cambios en tu código:
+Paso 1: Hacer tus cambios
+# Edita tu archivo bridge_server.py con los cambios que necesites
+nano bridge_server.py
+# o usa tu editor favorito
 
-## 5) Troubleshooting
-- Badge `!` rojo: la extensión no tiene sesión; vuelve a iniciar sesión en Lovable.
-- Cola que no baja: revisa conectividad con el bridge (`/health`) y que el dominio esté en `host_permissions`.
-- 403/401 en `/candidates` o `/config`: token inválido o cabeceras `X-Ally-User-Id` / `X-Ally-Agency-ID` faltantes; verifica sesión.
-- Para depurar, abre las DevTools del service worker: `chrome://extensions` → “service worker” (en la tarjeta de la extensión) → “Inspect”.
+Run in CloudShell
+Paso 2: Reconstruir la imagen Docker
+# Reconstruir la imagen con tus cambios
+docker build -t ally-fastapi-lambda .
+
+Run in CloudShell
+Paso 3: Etiquetar para ECR
+# Etiquetar la imagen para tu repositorio ECR
+docker tag ally-fastapi-lambda:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/ally-fastapi-lambda-app:latest
+
+Run in CloudShell
+Paso 4: Autenticarse con ECR (si no lo hiciste recientemente)
+# Solo necesario si no te autenticaste en las últimas horas
+aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+Run in CloudShell
+Paso 5: Subir la nueva imagen
+# Subir la imagen actualizada a ECR
+docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/ally-fastapi-lambda-app:latest
+
+Run in CloudShell
+Paso 6: Actualizar Lambda
+# Actualizar la función Lambda para usar la nueva imagen
+aws lambda update-function-code \
+  --function-name ally-fastapi-lambda-function \
+  --image-uri $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/ally-fastapi-lambda-app:latest \
+  --region $AWS_REGION
+
+Run in CloudShell
+Paso 7: Probar que funciona
+# Probar tu API
+curl https://vlux2ct9zi.execute-api.us-east-2.amazonaws.com/health
+
+# Ver logs en tiempo real (opcional)
+aws logs tail "/aws/lambda/ally-fastapi

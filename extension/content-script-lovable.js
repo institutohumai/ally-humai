@@ -3,7 +3,7 @@ function ensureExtensionContext(tag) {
   const ok = typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id;
   if (!ok) {
     const detail = `Extension context no disponible (${tag})`;
-    console.warn('[Ally Content Script]', detail);
+    console.info('[Ally Content Script]', detail); // Cambiado a info
     // Informa a la app para que marque desconectado y muestre acción de reconectar
     window.postMessage({ type: 'ALLY_PONG', active: false, detail }, '*');
     window.postMessage({ type: 'ALLY_SESSION_CLEARED' }, '*');
@@ -22,6 +22,9 @@ window.addEventListener('message', (event) => {
 
     // Mapear snake_case a camelCase
     const payload = event.data.payload || {};
+    console.log('[Ally Content Script] Payload recibido:', payload);
+    console.log('[Ally Content Script] agency_id recibido:', payload.agency_id); // Log específico para agency_id
+
     if (ensureExtensionContext('SESSION_UPDATE')) {
       try {
         chrome.runtime.sendMessage(
@@ -31,7 +34,8 @@ window.addEventListener('message', (event) => {
               accessToken: payload.access_token,
               refreshToken: payload.refresh_token,
               userId: payload.user_id,
-              expiresAt: payload.expires_at
+              expiresAt: payload.expires_at,
+              agencyId: payload.agency_id // Asegúrate de que Lovable envíe "agency_id"
             }
           },
           (response) => {
@@ -71,7 +75,7 @@ window.addEventListener('message', (event) => {
         console.warn('[Ally Content Script] Extension context invalidated para logout', error.message);
       }
     } else {
-      console.warn('[Ally Content Script] Extension context no disponible para logout');
+      // console.warn('[Ally Content Script] Extension context no disponible para logout');
     }
   }
 

@@ -1,11 +1,11 @@
-// === ALLY HUMAI - Content Script LinkedIn (Full + Certs + Skills + English Level) ===
+// === ALLY HUMAI - Content Script LinkedIn (v4.1 - Fusionada y Robusta) ===
 
 // --- Configuración ---
 const CONFIG = {
   POLL_INTERVAL_MS: 2000,
   RETRY_ATTEMPTS: 15,
   RETRY_DELAY_MS: 800,
-  SCROLL_STEPS: 7, // Aumentado para llegar al fondo (Idiomas suele estar al final)
+  SCROLL_STEPS: 8, // Scroll profundo para llegar a idiomas/proyectos
 };
 
 // --- Selectores ---
@@ -16,7 +16,12 @@ const SELECTORS = {
     "section.pv-top-card",
     ".artdeco-card",
   ],
-  SHOW_MORE: ".inline-show-more-text__button",
+  SHOW_MORE: "button[class*='inline-show-more-text__button']",
+
+  // --- MEJORA: Selector de Atributo ---
+  // Usamos [class*='...'] para que detecte "inline-show-more-text--is-collapsed"
+  // aunque LinkedIn le cambie el sufijo. Mantenemos tu fallback .t-14.t-normal.t-black
+  EXPANDABLE_TEXT: "[class*='inline-show-more-text'], .t-14.t-normal.t-black",
 };
 
 // --- Estado Global ---
@@ -35,16 +40,16 @@ function getEffectiveLocation() {
   }
 }
 
+function getCanonicalProfilePath() {
+  const loc = getEffectiveLocation();
+  const match = loc.pathname.match(/^\/in\/([^/]+\/?)/);
+  return match ? match[0] : null;
+}
+
 function getProfileIdFromUrl() {
   const loc = getEffectiveLocation();
   const match = loc.pathname.match(/^\/in\/([^/]+)/);
   return match ? match[1] : null;
-}
-
-function getCanonicalProfilePath() {
-  const loc = getEffectiveLocation();
-  const match = loc.pathname.match(/^\/in\/[^/]+\/?/);
-  return match ? match[0] : null;
 }
 
 function shouldRunInThisContext() {
@@ -83,13 +88,8 @@ function ensureHighlightStyle() {
       text-decoration-thickness: 3px;
       text-underline-offset: 3px;
       background-color: rgba(46, 204, 113, 0.1);
-      outline: none !important;
-      box-shadow: none !important;
     }
-    .inline-show-more-text__button:focus {
-        outline: none !important;
-        box-shadow: none !important;
-    }
+    *:focus { outline: none !important; box-shadow: none !important; }
   `;
   document.head.appendChild(style);
 }
@@ -109,17 +109,12 @@ function highlightElement(el) {
 async function locateTopCard() {
   for (let i = 0; i < CONFIG.RETRY_ATTEMPTS; i++) {
     const overlayLink = document.querySelector(SELECTORS.OVERLAY_LINK);
-    if (overlayLink) {
-      const card = overlayLink.closest("section");
-      if (card) return card;
-    }
+    if (overlayLink) return overlayLink.closest("section");
     for (const selector of SELECTORS.TOP_CARD_CONTAINERS) {
       const card = document.querySelector(selector);
       if (card) return card;
     }
-    if (i < CONFIG.RETRY_ATTEMPTS - 1) {
-      await new Promise((r) => setTimeout(r, CONFIG.RETRY_DELAY_MS));
-    }
+    await new Promise((r) => setTimeout(r, CONFIG.RETRY_DELAY_MS));
   }
   return null;
 }
@@ -151,12 +146,12 @@ const FIELD_STRATEGIES = {
     () => extractText("main h1"),
   ],
   role: [
+    (card) => extractText("div.text-body-medium", card), // Prioridad semántica
     (card) => extractText("div[data-test-id='top-card__headline']", card),
-    (card) => extractText(".text-body-medium", card),
   ],
   location: [
+    (card) => extractText("span.text-body-small.inline", card), // Prioridad semántica
     (card) => extractText("span[data-test-id='top-card__location']", card),
-    (card) => extractText(".text-body-small.inline", card),
   ],
   linkedin_url: [() => getEffectiveLocation().href.split("?")[0]],
 };
@@ -179,6 +174,7 @@ async function executeExtractors(topCard) {
   return data;
 }
 
+// Modificación en la función extractListSection para mejorar la extracción de work_experience
 function extractListSection(sectionId, fieldMap) {
   const sectionAnchor = document.getElementById(sectionId);
   if (!sectionAnchor) return [];
@@ -191,18 +187,42 @@ function extractListSection(sectionId, fieldMap) {
 
   return Array.from(items)
     .map((item) => {
-      const result = {};
+      const result = {
+        title: null,
+        company: null,
+        description: null,
+        date_range: null,
+      };
       let hasData = false;
+
       for (const [key, selector] of Object.entries(fieldMap)) {
-        const el = item.querySelector(selector);
+        let el = item.querySelector(selector);
+
+        // Lógica especial para descripciones (manteniendo SELECTORS.EXPANDABLE_TEXT)
+        if (!el && key === "description") {
+          el = item.querySelector(SELECTORS.EXPANDABLE_TEXT);
+        }
+
         if (el) {
-          result[key] = cleanString(el.innerText);
-          if (result[key]) {
-            highlightElement(el);
+          const visualSpan =
+            el.tagName === "SPAN"
+              ? el
+              : el.querySelector("span[aria-hidden='true']");
+          const rawText = visualSpan ? visualSpan.innerText : el.innerText;
+          const cleanText = cleanString(rawText);
+
+          // Evitar duplicados internos
+          const isDuplicate = Object.values(result).includes(cleanText);
+
+          if (cleanText && !isDuplicate) {
+            result[key] = cleanText;
+            highlightElement(visualSpan || el);
             hasData = true;
           }
         }
       }
+
+      // Validar que al menos uno de los campos tenga datos
       return hasData ? result : null;
     })
     .filter(Boolean);
@@ -218,13 +238,11 @@ async function humanScrollAndExpand() {
     window.scrollBy({ top: 300, behavior: "smooth" });
     await randomJitter(300, 600);
   }
-
   const btns = document.querySelectorAll(SELECTORS.SHOW_MORE);
   for (const btn of btns) {
     btn.click();
     await new Promise((r) => setTimeout(r, 20));
   }
-
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -243,12 +261,7 @@ function getVoyagerProfileJson(profileId) {
 
 function sendCandidate(candidate) {
   if (!candidate || !candidate.name) return;
-
-  // Validar si el contexto de la extensión está disponible
-  if (!chrome.runtime || !chrome.runtime.sendMessage) {
-    console.error("[Ally] Error: Contexto de la extensión no disponible.");
-    return;
-  }
+  if (!chrome.runtime || !chrome.runtime.sendMessage) return;
 
   try {
     chrome.runtime.sendMessage(
@@ -259,7 +272,7 @@ function sendCandidate(candidate) {
       },
     );
   } catch (e) {
-    console.error("[Ally] Error de conexión:", e);
+    console.error("[Ally] Error envío:", e);
   }
 }
 
@@ -280,48 +293,45 @@ async function gatherAndSend() {
   // 1. Extracción DOM Base
   let candidate = await executeExtractors(topCard);
 
-  // 2. Enriquecimiento con API Voyager (Comentado)
-  // const profileId = getProfileIdFromUrl();
-  // if (profileId) {
-  //   const voyagerData = await getVoyagerProfileJson(profileId);
-  //   if (voyagerData) {
-  //     console.log("[Ally] Fusionando datos de Voyager...");
+  // 2. Voyager (API)
+  const profileId = getProfileIdFromUrl();
+  if (profileId) {
+    const voyagerData = await getVoyagerProfileJson(profileId);
+    if (voyagerData) {
+      console.log("[Ally] Fusionando datos de Voyager...");
+      const voyagerEnglish = voyagerData.languages?.find((l) =>
+        /english|inglés|ingles/i.test(l.name),
+      );
+      candidate = {
+        ...candidate,
+        headline: voyagerData.headline || candidate.role,
+        location: voyagerData.locationName || candidate.location,
+        alternative_cv: voyagerData.website,
+        skills: voyagerData.skills?.map((s) => s.name).filter(Boolean),
+        about: voyagerData.summary,
+        level_of_english: voyagerEnglish
+          ? voyagerEnglish.proficiency
+          : undefined,
+      };
+    }
+  }
 
-  //     // Buscar nivel de inglés en Voyager
-  //     const voyagerEnglish = voyagerData.languages?.find((l) =>
-  //       /english|inglés|ingles|Inglés|English/i.test(l.name),
-  //     );
-
-  //     candidate = {
-  //       ...candidate,
-  //       headline: voyagerData.headline || candidate.role,
-  //       location: voyagerData.locationName || candidate.location,
-  //       alternative_cv: voyagerData.website,
-  //       skills: voyagerData.skills?.map((s) => s.name).filter(Boolean),
-  //       about: voyagerData.summary,
-  //       level_of_english: voyagerEnglish
-  //         ? voyagerEnglish.proficiency
-  //         : undefined,
-  //     };
-  //   }
-  // }
-
-  // 3. Scroll y Listas
+  // 3. Scroll
   await humanScrollAndExpand();
 
   // Experiencia
   candidate.work_experience = extractListSection("experience", {
     title: ".t-bold span[aria-hidden='true']",
     company: ".t-14.t-normal span[aria-hidden='true']",
-    description: ".wOLGhQneMtuPCjjutWcjeQtdvnOeYMaMhs", // Selector para la descripción
-    date_from: ".t-14.t-normal.t-black--light span[aria-hidden='true']:nth-of-type(1)", // Selector para la fecha de inicio
-    date_to: ".t-14.t-normal.t-black--light span[aria-hidden='true']:nth-of-type(2)", // Selector para la fecha de fin
+    description: SELECTORS.EXPANDABLE_TEXT,
+    date_range: ".t-black--light span[aria-hidden='true']:first-child",
   });
 
   // Educación
   candidate.education = extractListSection("education", {
     institution: ".t-bold span[aria-hidden='true']",
     degree: ".t-14.t-normal span[aria-hidden='true']",
+    description: SELECTORS.EXPANDABLE_TEXT,
   });
 
   // Certificaciones
@@ -331,47 +341,59 @@ async function gatherAndSend() {
     issue_date: ".t-black--light span[aria-hidden='true']",
   });
 
+  // Proyectos
+  candidate.projects = extractListSection("projects", {
+    title: ".t-bold span[aria-hidden='true']",
+    date: ".t-black--light span[aria-hidden='true']",
+    description: SELECTORS.EXPANDABLE_TEXT,
+  });
+
   // Skills (DOM)
-  const domSkillsObjects = extractListSection("skills", {
+  const domSkills = extractListSection("skills", {
     name: ".t-bold span[aria-hidden='true']",
   });
-  if (domSkillsObjects && domSkillsObjects.length > 0) {
-    const scrapedSkills = domSkillsObjects.map((s) => s.name);
+  if (domSkills.length > 0) {
+    const skillsList = domSkills.map((s) => s.name);
     candidate.skills = candidate.skills
-      ? [...new Set([...candidate.skills, ...scrapedSkills])]
-      : scrapedSkills;
+      ? [...new Set([...candidate.skills, ...skillsList])]
+      : skillsList;
   }
 
-  // --- IDIOMAS / NIVEL DE INGLÉS (NUEVO) ---
+  // --- IDIOMAS (Consolidado) ---
   const languagesList = extractListSection("languages", {
     language: ".t-bold span[aria-hidden='true']",
-    proficiency: ".t-14.t-normal.t-black--light span[aria-hidden='true']",
+    description: ".t-14.t-normal.t-black--light span[aria-hidden='true']", // Selector actualizado
   });
 
   if (languagesList && languagesList.length > 0) {
-    // Buscamos específicamente inglés
+    candidate.languages = languagesList.map((lang) => ({
+      language: lang.language,
+      description: lang.description || "",
+    }));
+
+    // Buscar el idioma "Inglés" y asignar su descripción a level_of_english
     const englishEntry = languagesList.find((l) =>
-      /english|inglés|ingles|Inglés|English/i.test(l.language),
+      /english|inglés|Ingles|English|Inglés|ingles/i.test(l.language),
     );
-    if (englishEntry && englishEntry.proficiency) {
-      console.log(
-        "[Ally] Nivel de inglés encontrado en DOM:",
-        englishEntry.proficiency,
-      );
-      candidate.level_of_english = englishEntry.proficiency;
+    if (englishEntry && englishEntry.description) {
+      candidate.level_of_english = englishEntry.description;
+    } else {
+      candidate.level_of_english = ""; // Vacío si no se encuentra descripción
     }
+
+    console.log("[Ally] Idiomas recopilados:", candidate.languages);
   }
 
-  // About
+  // About (Con selector robusto para evitar clases hash)
   const aboutAnchor = document.getElementById("about");
   if (aboutAnchor) {
     const aboutSection = aboutAnchor.closest("section");
     if (aboutSection) {
-      const aboutTextEl = aboutSection.querySelector(
-        ".wOLGhQneMtuPCjjutWcjeQtdvnOeYMaMhs",
-      );
+      const aboutTextEl = aboutSection.querySelector(SELECTORS.EXPANDABLE_TEXT);
       if (aboutTextEl) {
-        const text = cleanString(aboutTextEl.innerText);
+        const visualText =
+          aboutTextEl.querySelector("span[aria-hidden='true']") || aboutTextEl;
+        const text = cleanString(visualText.innerText);
         if (text) {
           candidate.about = text;
           highlightElement(aboutTextEl);
@@ -383,6 +405,7 @@ async function gatherAndSend() {
   return candidate;
 }
 
+// --- Loop ---
 async function processProfile() {
   if (isProcessing) return;
   if (!shouldRunInThisContext()) return;
@@ -394,45 +417,31 @@ async function processProfile() {
   if (sessionStorage.getItem("ally:lastSent") === canonicalPath) return;
 
   isProcessing = true;
-  console.log(`[Ally] Iniciando en contexto: ${window.location.pathname}`);
+  console.log(`[Ally] Procesando: ${window.location.pathname}`);
 
   try {
     const candidate = await gatherAndSend();
-
     if (candidate && candidate.name) {
       sessionStorage.setItem("ally:lastSent", canonicalPath);
-      // Asegurar que 'level_of_english' se envíe aunque esté vacío
-      if (!candidate.level_of_english) {
-        candidate.level_of_english = "";
-      }
+      if (!candidate.level_of_english) candidate.level_of_english = "";
       sendCandidate(candidate);
     }
   } catch (error) {
-    console.error("[Ally] Excepción:", error);
+    console.error("[Ally] Error:", error);
   } finally {
     isProcessing = false;
   }
 }
 
-// ========================================================
-// 7. INICIALIZACIÓN
-// ========================================================
-
+// --- Init ---
 function init() {
-  observer = new MutationObserver(() => {
-    processProfile();
-  });
-
-  if (document.body) {
+  observer = new MutationObserver(() => processProfile());
+  if (document.body)
     observer.observe(document.body, { childList: true, subtree: true });
-    processProfile();
-  } else {
-    window.addEventListener("DOMContentLoaded", () => {
-      observer.observe(document.body, { childList: true, subtree: true });
-      processProfile();
-    });
-  }
-
+  else
+    window.addEventListener("DOMContentLoaded", () =>
+      observer.observe(document.body, { childList: true, subtree: true }),
+    );
   setInterval(processProfile, CONFIG.POLL_INTERVAL_MS);
 }
 

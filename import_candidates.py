@@ -8,7 +8,14 @@ import csv
 import json
 import requests
 import time
+from typing import Optional  # Asegurar que Optional esté importado
+import os
 
+
+SUPABASE_ANON_KEY = os.getenv(
+    "SUPABASE_ANON_KEY",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndpcWVoZmZxeW1lZ2NicWdnZ2prIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEwNTYwMDEsImV4cCI6MjA3NjYzMjAwMX0.9R9VviyjfNIhPLyos05FGGm2yHH41sjgWj-NFApSNto"
+)
 # Configuration
 CSV_FILE = "data/candidatos.csv"
 API_URL = "https://wiqehffqymegcbqgggjk.supabase.co/functions/v1/import-candidates"
@@ -70,7 +77,7 @@ def read_candidates_from_csv(csv_path, limit=None):
     
     return candidates
 
-def send_batch_to_api(candidates, batch_num, total_batches, agency_id_override=None, created_by_override=None):
+def send_batch_to_api(candidates, batch_num, total_batches, agency_id_override=None, created_by_override=None,auth_token: Optional[str] = None):
     """
     Send batch of candidates to the API
     
@@ -89,11 +96,13 @@ def send_batch_to_api(candidates, batch_num, total_batches, agency_id_override=N
     }
     
     headers = {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Authorization": auth_token,  # Agregar el token de autorización
+        "apikey": SUPABASE_ANON_KEY
     }
     
     try:
-        response = requests.post(API_URL, headers=headers, json=payload)
+        response = requests.post(API_URL, headers=headers, json=payload,timeout=30)
         
         if response.status_code == 200:
             return True, response
