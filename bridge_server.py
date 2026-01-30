@@ -72,7 +72,7 @@ class CandidatePayload(BaseModel):
     skills: Optional[List[str]] = None
     certifications: Optional[List[Dict[str, Any]]] = None
     languages: Optional[List[Dict[str, Any]]] = None
-
+    about: Optional[str] = None
     model_config = ConfigDict(str_strip_whitespace=True)
 
 # --- LÓGICA DE TRANSFORMACIÓN ---

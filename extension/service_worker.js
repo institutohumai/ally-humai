@@ -349,7 +349,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!accessToken || !userId) {
           throw new Error("Datos de sesión incompletos");
         }
-        console.log("accessToken:", accessToken);
         const newSession = {
           accessToken,
           refreshToken,

@@ -36,11 +36,23 @@ Edita `extension/manifest.json`:
 3. El service worker llama al bridge (`/config` para agency_id/created_by y `/candidates` para enviar el payload). Si falla, guarda en cola y reintenta.
 
 ### Guía paso a paso: Cómo actualizar bridge_server en producción
+
 🎯 Cuando quieras hacer cambios en tu código:
 Paso 1: Hacer tus cambios
-# Edita tu archivo bridge_server.py con los cambios que necesites
-nano bridge_server.py
-# o usa tu editor favorito
+# Edita tu archivo bridge_server.py (o el que sea) con los cambios que necesites y volver a subir
+
+
+DEFINIR ENVS EN CLOUDSHELL:
+# Obtener y configurar tu Account ID
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+# Configurar la región (si no está ya configurada)
+export AWS_REGION=us-east-2
+
+# Verificar que están bien configuradas
+echo "AWS_ACCOUNT_ID: $AWS_ACCOUNT_ID"
+echo "AWS_REGION: $AWS_REGION"
+
 
 Run in CloudShell
 Paso 2: Reconstruir la imagen Docker
