@@ -233,7 +233,6 @@ function extractListSection(sectionId, fieldMap) {
 // ========================================================
 
 async function humanScrollAndExpand() {
-  console.log("[Ally] Scroll humano activado...");
   for (let i = 0; i < CONFIG.SCROLL_STEPS; i++) {
     window.scrollBy({ top: 300, behavior: "smooth" });
     await randomJitter(300, 600);
@@ -298,7 +297,6 @@ async function gatherAndSend() {
   if (profileId) {
     const voyagerData = await getVoyagerProfileJson(profileId);
     if (voyagerData) {
-      console.log("[Ally] Fusionando datos de Voyager...");
       const voyagerEnglish = voyagerData.languages?.find((l) =>
         /english|inglés|ingles/i.test(l.name),
       );
@@ -381,7 +379,6 @@ async function gatherAndSend() {
       candidate.level_of_english = ""; // Vacío si no se encuentra descripción
     }
 
-    console.log("[Ally] Idiomas recopilados:", candidate.languages);
   }
 
   // About (Con selector robusto para evitar clases hash)
@@ -417,7 +414,6 @@ async function processProfile() {
   if (sessionStorage.getItem("ally:lastSent") === canonicalPath) return;
 
   isProcessing = true;
-  console.log(`[Ally] Procesando: ${window.location.pathname}`);
 
   try {
     const candidate = await gatherAndSend();

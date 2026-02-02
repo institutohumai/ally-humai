@@ -13,18 +13,11 @@ function ensureExtensionContext(tag) {
 window.addEventListener('message', (event) => {
   if (event.source !== window) return;
 
-  console.log('[Ally Content Script] Dominio actual:', window.location.origin, window.location.href);
-  console.log('[Ally Content Script] Es frame principal:', window === window.top);
-  console.log('[Ally Content Script] chrome:', typeof chrome, chrome);
-
   if (event.data.type === 'ALLY_SESSION_UPDATE') {
-    console.log('[Ally Content Script] Recibido de Lovable:', event.data.payload);
 
     // Mapear snake_case a camelCase
     const payload = event.data.payload || {};
-    console.log('[Ally Content Script] Payload recibido:', payload);
-    console.log('[Ally Content Script] agency_id recibido:', payload.agency_id); // Log específico para agency_id
-
+   
     if (ensureExtensionContext('SESSION_UPDATE')) {
       try {
         chrome.runtime.sendMessage(
@@ -70,7 +63,6 @@ window.addEventListener('message', (event) => {
         chrome.runtime.sendMessage({
           type: 'ALLY_CLEAR_SESSION'
         });
-        console.log('[Ally Content Script] Logout reenviado al service worker');
       } catch (error) {
         console.warn('[Ally Content Script] Extension context invalidated para logout', error.message);
       }
