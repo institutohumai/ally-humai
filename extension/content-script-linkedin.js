@@ -1,37 +1,19 @@
-// === ALLY HUMAI - Content Script LinkedIn (v4.1 - Fusionada y Robusta) ===
+// === ALLY HUMAI - Content Script "AI Feeder" (V5: Full UI Feedback) ===
 
-// --- Configuración ---
 const CONFIG = {
-  POLL_INTERVAL_MS: 2000,
-  RETRY_ATTEMPTS: 15,
-  RETRY_DELAY_MS: 800,
-  SCROLL_STEPS: 8, // Scroll profundo para llegar a idiomas/proyectos
+  SCROLL_STEPS: 6,
+  SCROLL_DELAY: 600, // Tiempo entre scrolleos
+  CLICK_DELAY_MIN: 300, // Mínimo tiempo entre clics (Anti-Ban)
+  CLICK_DELAY_MAX: 700, // Máximo tiempo entre clics (Anti-Ban)
+  RENDER_WAIT: 800, // Tiempo extra para que el texto aparezca tras el clic
 };
 
-// --- Selectores ---
-const SELECTORS = {
-  OVERLAY_LINK: "a[href*='/overlay/about-this-profile/']",
-  TOP_CARD_CONTAINERS: [
-    "section[data-member-id]",
-    "section.pv-top-card",
-    ".artdeco-card",
-  ],
-  SHOW_MORE: "button[class*='inline-show-more-text__button']",
-
-  // --- MEJORA: Selector de Atributo ---
-  // Usamos [class*='...'] para que detecte "inline-show-more-text--is-collapsed"
-  // aunque LinkedIn le cambie el sufijo. Mantenemos tu fallback .t-14.t-normal.t-black
-  EXPANDABLE_TEXT: "[class*='inline-show-more-text'], .t-14.t-normal.t-black",
-};
-
-// --- Estado Global ---
 let isProcessing = false;
-let observer = null;
+let isExtensionActive = false;
+let stopFlag = false;
+const pendingWaiters = new Set();
 
-// ========================================================
-// 1. GESTIÓN DE CONTEXTO (IFRAMES)
-// ========================================================
-
+// --- HELPERS DE UBICACIÓN ---
 function getEffectiveLocation() {
   try {
     return window.top.location;
@@ -46,399 +28,390 @@ function getCanonicalProfilePath() {
   return match ? match[0] : null;
 }
 
-function getProfileIdFromUrl() {
-  const loc = getEffectiveLocation();
-  const match = loc.pathname.match(/^\/in\/([^/]+)/);
-  return match ? match[1] : null;
+// --- HELPERS DE TIEMPO (HUMAN JITTER) ---
+const wait = (ms) =>
+  new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingWaiters.delete(cancel);
+      resolve();
+    }, ms);
+    const cancel = () => {
+      clearTimeout(timer);
+      pendingWaiters.delete(cancel);
+      resolve();
+    };
+    pendingWaiters.add(cancel);
+  });
+const randomDelay = (min, max) =>
+  Math.floor(Math.random() * (max - min + 1)) + min;
+
+function flushPendingWaits() {
+  pendingWaiters.forEach((cancel) => cancel());
+  pendingWaiters.clear();
 }
 
-function shouldRunInThisContext() {
-  if (window.location.pathname.includes("/preload/")) return true;
-  const preloadFrame = document.querySelector('iframe[src*="/preload/"]');
-  if (window === window.top && preloadFrame) return false;
-  return true;
+// Evita inyectar HTML al mostrar mensajes dinámicos
+const sanitizeText = (text = "") =>
+  text
+    .toString()
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+function removeStatusCard() {
+  const card = document.getElementById("ally-status-card");
+  if (card) card.remove();
 }
 
-// ========================================================
-// 2. UTILIDADES VISUALES Y DE TEXTO
-// ========================================================
-
-function cleanString(input) {
-  if (!input) return undefined;
-  return input
-    .replace(/\s+/g, " ")
-    .replace(/[\u200B-\u200D\uFEFF]/g, "")
-    .trim();
+function activateExtension() {
+  const wasSleeping = stopFlag || !isExtensionActive;
+  stopFlag = false;
+  isExtensionActive = true;
+  if (wasSleeping) console.info("[Ally] Sleep Mode desactivado");
 }
 
-function randomJitter(min = 400, max = 1000) {
-  return new Promise((res) =>
-    setTimeout(res, Math.floor(Math.random() * (max - min + 1)) + min),
-  );
+function enterSleepMode(reason = "unknown") {
+  if (!stopFlag || isExtensionActive)
+    console.info("[Ally] Sleep Mode activado:", reason);
+  stopFlag = true;
+  isExtensionActive = false;
+  isProcessing = false;
+  flushPendingWaits();
+  removeStatusCard();
 }
 
-function ensureHighlightStyle() {
-  if (document.getElementById("ally-highlight-style")) return;
-  const style = document.createElement("style");
-  style.id = "ally-highlight-style";
-  style.textContent = `
-    .ally-highlight {
-      text-decoration: underline;
-      text-decoration-color: #2ecc71;
-      text-decoration-thickness: 3px;
-      text-underline-offset: 3px;
-      background-color: rgba(46, 204, 113, 0.1);
-    }
-    *:focus { outline: none !important; box-shadow: none !important; }
-  `;
-  document.head.appendChild(style);
+function hasStopSignal() {
+  return stopFlag || !isExtensionActive;
 }
 
-function highlightElement(el) {
-  if (!el || el.dataset.allyHighlighted === "true") return;
-  ensureHighlightStyle();
-  el.classList.add("ally-highlight");
-  el.dataset.allyHighlighted = "true";
-  el.blur();
-}
-
-// ========================================================
-// 3. LÓGICA DE LOCALIZACIÓN
-// ========================================================
-
-async function locateTopCard() {
-  for (let i = 0; i < CONFIG.RETRY_ATTEMPTS; i++) {
-    const overlayLink = document.querySelector(SELECTORS.OVERLAY_LINK);
-    if (overlayLink) return overlayLink.closest("section");
-    for (const selector of SELECTORS.TOP_CARD_CONTAINERS) {
-      const card = document.querySelector(selector);
-      if (card) return card;
-    }
-    await new Promise((r) => setTimeout(r, CONFIG.RETRY_DELAY_MS));
-  }
-  return null;
-}
-
-// ========================================================
-// 4. MOTORES DE EXTRACCIÓN
-// ========================================================
-
-async function extractText(selector, baseElement = document) {
-  const el = baseElement.querySelector(selector);
-  if (!el) return undefined;
-
-  const moreBtn = el.querySelector(SELECTORS.SHOW_MORE);
-  if (moreBtn) {
-    moreBtn.click();
-    await new Promise((r) => setTimeout(r, 50));
-  }
-
-  const text = cleanString(el.innerText || el.textContent);
-  if (text) highlightElement(el);
-  return text;
-}
-
-const FIELD_STRATEGIES = {
-  name: [
-    (card) =>
-      card.querySelector(SELECTORS.OVERLAY_LINK)?.getAttribute("aria-label"),
-    (card) => extractText("h1", card),
-    () => extractText("main h1"),
-  ],
-  role: [
-    (card) => extractText("div.text-body-medium", card), // Prioridad semántica
-    (card) => extractText("div[data-test-id='top-card__headline']", card),
-  ],
-  location: [
-    (card) => extractText("span.text-body-small.inline", card), // Prioridad semántica
-    (card) => extractText("span[data-test-id='top-card__location']", card),
-  ],
-  linkedin_url: [() => getEffectiveLocation().href.split("?")[0]],
-};
-
-async function executeExtractors(topCard) {
-  const data = {};
-  for (const [field, strategies] of Object.entries(FIELD_STRATEGIES)) {
-    for (const strategy of strategies) {
-      try {
-        const value = await strategy(topCard || document);
-        if (value) {
-          data[field] = cleanString(value);
-          break;
-        }
-      } catch (e) {
-        continue;
-      }
-    }
-  }
-  return data;
-}
-
-// Modificación en la función extractListSection para mejorar la extracción de work_experience
-function extractListSection(sectionId, fieldMap) {
-  const sectionAnchor = document.getElementById(sectionId);
-  if (!sectionAnchor) return [];
-  const section = sectionAnchor.closest("section");
-  if (!section) return [];
-
-  const items = section.querySelectorAll(
-    "li.artdeco-list__item, li.pvs-list__paged-list-item",
-  );
-
-  return Array.from(items)
-    .map((item) => {
-      const result = {
-        title: null,
-        company: null,
-        description: null,
-        date_range: null,
-      };
-      let hasData = false;
-
-      for (const [key, selector] of Object.entries(fieldMap)) {
-        let el = item.querySelector(selector);
-
-        // Lógica especial para descripciones (manteniendo SELECTORS.EXPANDABLE_TEXT)
-        if (!el && key === "description") {
-          el = item.querySelector(SELECTORS.EXPANDABLE_TEXT);
-        }
-
-        if (el) {
-          const visualSpan =
-            el.tagName === "SPAN"
-              ? el
-              : el.querySelector("span[aria-hidden='true']");
-          const rawText = visualSpan ? visualSpan.innerText : el.innerText;
-          const cleanText = cleanString(rawText);
-
-          // Evitar duplicados internos
-          const isDuplicate = Object.values(result).includes(cleanText);
-
-          if (cleanText && !isDuplicate) {
-            result[key] = cleanText;
-            highlightElement(visualSpan || el);
-            hasData = true;
-          }
-        }
-      }
-
-      // Validar que al menos uno de los campos tenga datos
-      return hasData ? result : null;
-    })
-    .filter(Boolean);
-}
-
-// ========================================================
-// 5. NAVEGACIÓN Y COMUNICACIÓN
-// ========================================================
-
-async function humanScrollAndExpand() {
-  for (let i = 0; i < CONFIG.SCROLL_STEPS; i++) {
-    window.scrollBy({ top: 300, behavior: "smooth" });
-    await randomJitter(300, 600);
-  }
-  const btns = document.querySelectorAll(SELECTORS.SHOW_MORE);
-  for (const btn of btns) {
-    btn.click();
-    await new Promise((r) => setTimeout(r, 20));
-  }
-  window.scrollTo({ top: 0, behavior: "smooth" });
-}
-
-function getVoyagerProfileJson(profileId) {
+async function checkExtensionStatus() {
   return new Promise((resolve) => {
+    if (!chrome?.runtime?.sendMessage) {
+      enterSleepMode("runtime_unavailable");
+      resolve(false);
+      return;
+    }
+
     try {
-      chrome.runtime.sendMessage(
-        { type: "ALLY_GET_VOYAGER_PROFILE", profileId },
-        (response) => resolve(response?.json || null),
-      );
-    } catch (e) {
-      resolve(null);
+      chrome.runtime.sendMessage({ type: "ALLY_PING" }, (response) => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          console.warn("[Ally] Ping falló:", lastError.message);
+          enterSleepMode("ping_error");
+          resolve(false);
+          return;
+        }
+
+        const active = response?.active === true;
+        if (active) {
+          activateExtension();
+        } else {
+          enterSleepMode("session_inactiva");
+        }
+        resolve(active);
+      });
+    } catch (error) {
+      console.warn("[Ally] Ping exception:", error.message);
+      enterSleepMode("ping_exception");
+      resolve(false);
     }
   });
 }
 
-function sendCandidate(candidate) {
-  if (!candidate || !candidate.name) return;
-  if (!chrome.runtime || !chrome.runtime.sendMessage) return;
+// ========================================================
+// 1. SISTEMA DE NOTIFICACIONES (NUEVO: ESTADOS)
+// ========================================================
 
+function createOrUpdateCard(status, data = null) {
+  // Buscamos si ya existe la tarjeta (para actualizarla en lugar de crear otra)
+  let card = document.getElementById("ally-status-card");
+
+  // Si no existe, la creamos desde cero
+  if (!card) {
+    card = document.createElement("div");
+    card.id = "ally-status-card"; // ID genérico para estados
+
+    // Estilos base
+    Object.assign(card.style, {
+      position: "fixed",
+      top: "80px", // Debajo del nav de LinkedIn
+      right: "20px",
+      width: "280px",
+      backgroundColor: "white",
+      boxShadow: "0 4px 15px rgba(0,0,0,0.2)",
+      borderRadius: "10px",
+      padding: "16px",
+      zIndex: "2147483647", // Máximo posible para que nada lo tape
+      fontFamily:
+        "-apple-system, system-ui, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+      transition: "all 0.3s ease", // Transición suave entre colores/tamaños
+      opacity: "0",
+      transform: "translateX(20px)",
+      borderLeft: "6px solid #ccc", // Color por defecto
+    });
+
+    document.body.appendChild(card);
+
+    // Animación de entrada
+    requestAnimationFrame(() => {
+      card.style.opacity = "1";
+      card.style.transform = "translateX(0)";
+    });
+  }
+
+  card.dataset.state = status;
+
+  // --- ESTADO: PROCESANDO (AZUL) ---
+  if (status === "processing") {
+    card.style.borderLeftColor = "#3498db"; // Azul
+    card.innerHTML = `
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <div class="ally-spinner" style="
+            width: 18px; 
+            height: 18px; 
+            border: 3px solid #f3f3f3; 
+            border-top: 3px solid #3498db; 
+            border-radius: 50%; 
+            animation: ally-spin 1s linear infinite;">
+        </div>
+        <div>
+          <h3 style="margin:0; font-size:14px; font-weight:600; color:#2c3e50;">Analizando Perfil...</h3>
+          <p style="margin:2px 0 0 0; font-size:11px; color:#7f8c8d;">Extrayendo info oculta</p>
+        </div>
+      </div>
+      <style>@keyframes ally-spin {0% {transform: rotate(0deg);} 100% {transform: rotate(360deg);}}</style>
+    `;
+  }
+
+  // --- ESTADO: ÉXITO (VERDE) ---
+  else if (status === "success") {
+    card.style.borderLeftColor = "#2ecc71"; // Verde
+    card.innerHTML = `
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <h3 style="margin:0; font-size:15px; font-weight:700; color:#27ae60;">✅ Perfil Procesado</h3>
+      </div>
+      <div style="font-size:13px; color:#34495e;">
+        <p style="margin: 4px 0;"><strong>Nombre:</strong> ${data.name || "Detectado"}</p>
+        <p style="margin: 4px 0;"><strong>Inglés:</strong> ${data.level_of_english || "N/A"}</p>
+        <p style="margin: 4px 0;"><strong>Skills:</strong> ${(data.skills || []).slice(0, 3).join(", ")}...</p>
+        <p style="margin: 4px 0; color:#95a5a6; font-size:11px; text-align:right;">IA Powered by Gemini</p>
+      </div>
+    `;
+
+    // Auto-ocultar después de 5 segundos
+    setTimeout(() => {
+      if (card) {
+        card.style.opacity = "0";
+        card.style.transform = "translateX(20px)";
+        setTimeout(() => card.remove(), 500);
+      }
+    }, 5000);
+  }
+
+  // --- ESTADO: ERROR (ROJO) ---
+  else if (status === "error") {
+    const detail =
+      sanitizeText(
+        (data && (data.message || data.detail)) ||
+          "No pudimos conectar con ALLY. Reintenta en unos segundos.",
+      );
+
+    card.style.borderLeftColor = "#e74c3c"; // Rojo
+    card.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <h3 style="margin:0; font-size:15px; font-weight:700; color:#c0392b;">⚠️ Error al enviar</h3>
+        <button data-ally-dismiss style="background:none; border:none; font-size:16px; cursor:pointer; color:#95a5a6;">×</button>
+      </div>
+      <p style="margin:4px 0; font-size:13px; color:#7f8c8d; line-height:1.4;">${detail}</p>
+      <p style="margin:6px 0 0 0; font-size:11px; color:#bdc3c7;">Verifica tu conexión o vuelve a intentar luego.</p>
+    `;
+
+    const dismissButton = card.querySelector("[data-ally-dismiss]");
+    if (dismissButton) {
+      dismissButton.addEventListener("click", () => {
+        card.style.opacity = "0";
+        card.style.transform = "translateX(20px)";
+        setTimeout(() => card.remove(), 500);
+      });
+    }
+  }
+}
+
+// ========================================================
+// 2. EXPANSIÓN INTELIGENTE (Igual que V4)
+// ========================================================
+async function expandContent() {
+  if (hasStopSignal()) return;
+  console.log("[Ally] Expandiendo información oculta...");
+
+  const selectors = [
+    "button.inline-show-more-text__button",
+    ".pv-profile-section__see-more-inline",
+    "#line-clamp-show-more-button",
+  ];
+
+  const potentialButtons = Array.from(
+    document.querySelectorAll(selectors.join(",")),
+  );
+  const visibleButtons = potentialButtons.filter(
+    (b) => b.offsetParent !== null,
+  );
+
+  for (const btn of visibleButtons) {
+    if (hasStopSignal()) return;
+    try {
+      const text = btn.innerText.toLowerCase();
+      if (
+        text.includes("more") ||
+        text.includes("más") ||
+        text.includes("ver")
+      ) {
+        btn.click();
+        await wait(randomDelay(CONFIG.CLICK_DELAY_MIN, CONFIG.CLICK_DELAY_MAX));
+        if (hasStopSignal()) return;
+      }
+    } catch (e) {
+      /* Ignorar errores */
+    }
+  }
+
+  if (hasStopSignal()) return;
+  await wait(CONFIG.RENDER_WAIT);
+}
+
+// ========================================================
+// 3. SCROLL HUMANO (Igual que V4)
+// ========================================================
+async function humanScroll() {
+  if (hasStopSignal()) return;
+  console.log("[Ally] Scrolleando para cargar elementos...");
+  for (let i = 0; i < CONFIG.SCROLL_STEPS; i++) {
+    if (hasStopSignal()) return;
+    window.scrollBy({ top: 400, behavior: "smooth" });
+    await wait(CONFIG.SCROLL_DELAY + randomDelay(0, 200));
+    if (hasStopSignal()) return;
+  }
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  await wait(500);
+  if (hasStopSignal()) return;
+}
+
+// ========================================================
+// 4. EXTRACCIÓN Y EMPAQUETADO
+// ========================================================
+async function scrapeRawProfile() {
+  await humanScroll();
+  if (hasStopSignal()) return null;
+  await expandContent();
+  if (hasStopSignal()) return null;
+
+  const rawText = document.body.innerText;
+  const title = document.title || "";
+  const nameParts = title.split(" | ")[0].split(" - ")[0];
+
+  return {
+    raw_text: rawText,
+    linkedin_url: window.location.href.split("?")[0],
+    known_name: nameParts.trim(),
+  };
+}
+
+// ========================================================
+// 5. ENVÍO Y COMUNICACIÓN
+// ========================================================
+function sendToBridge(payload) {
+  if (hasStopSignal()) return;
   try {
+    console.log("[Ally] Enviando perfil a procesar por IA...");
     chrome.runtime.sendMessage(
-      { type: "ALLY_CANDIDATE", payload: candidate },
+      { type: "ALLY_CANDIDATE", payload: payload },
       (res) => {
         if (!chrome.runtime.lastError)
-          console.log("[Ally] Candidato enviado:", candidate.name);
+          console.log("[Ally] Enviado correctamente.");
       },
     );
   } catch (e) {
-    console.error("[Ally] Error envío:", e);
+    console.error("[Ally] Error de envío:", e);
   }
 }
 
+// Listener: Recibe el éxito y actualiza la tarjeta a VERDE
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === "ALLY_SUCCESS_NOTIFICATION") {
+    console.log("[Ally UI] Mostrando éxito");
+    createOrUpdateCard("success", msg.data);
+  }
+
+  if (msg.type === "ALLY_BRIDGE_ERROR") {
+    console.warn("[Ally UI] Error de red", msg.detail);
+    createOrUpdateCard("error", { message: msg.detail });
+  }
+
+  if (msg.type === "ALLY_STOP_SCRAPING") {
+    console.info("[Ally UI] Sleep Mode solicitado por el Service Worker");
+    enterSleepMode("stop_signal");
+  }
+
+  if (msg.type === "ALLY_SESSION_CLEARED") {
+    enterSleepMode("session_cleared");
+  }
+});
+
 // ========================================================
-// 6. FLUJO PRINCIPAL
+// 6. BUCLE PRINCIPAL (MODIFICADO PARA ESTADOS)
 // ========================================================
-
-async function gatherAndSend() {
-  const topCard = await locateTopCard();
-
-  if (!topCard) {
-    if (window.location.pathname.includes("/preload/")) {
-      console.warn("[Ally] Iframe cargado pero Top Card no encontrado.");
-    }
-    return null;
-  }
-
-  // 1. Extracción DOM Base
-  let candidate = await executeExtractors(topCard);
-
-  // 2. Voyager (API)
-  const profileId = getProfileIdFromUrl();
-  if (profileId) {
-    const voyagerData = await getVoyagerProfileJson(profileId);
-    if (voyagerData) {
-      const voyagerEnglish = voyagerData.languages?.find((l) =>
-        /english|inglés|ingles/i.test(l.name),
-      );
-      candidate = {
-        ...candidate,
-        headline: voyagerData.headline || candidate.role,
-        location: voyagerData.locationName || candidate.location,
-        alternative_cv: voyagerData.website,
-        skills: voyagerData.skills?.map((s) => s.name).filter(Boolean),
-        about: voyagerData.summary,
-        level_of_english: voyagerEnglish
-          ? voyagerEnglish.proficiency
-          : undefined,
-      };
-    }
-  }
-
-  // 3. Scroll
-  await humanScrollAndExpand();
-
-  // Experiencia
-  candidate.work_experience = extractListSection("experience", {
-    title: ".t-bold span[aria-hidden='true']",
-    company: ".t-14.t-normal span[aria-hidden='true']",
-    description: SELECTORS.EXPANDABLE_TEXT,
-    date_range: ".t-black--light span[aria-hidden='true']:first-child",
-  });
-
-  // Educación
-  candidate.education = extractListSection("education", {
-    institution: ".t-bold span[aria-hidden='true']",
-    degree: ".t-14.t-normal span[aria-hidden='true']",
-    description: SELECTORS.EXPANDABLE_TEXT,
-  });
-
-  // Certificaciones
-  candidate.certifications = extractListSection("licenses_and_certifications", {
-    name: ".t-bold span[aria-hidden='true']",
-    organization: ".t-14.t-normal span[aria-hidden='true']",
-    issue_date: ".t-black--light span[aria-hidden='true']",
-  });
-
-  // Proyectos
-  candidate.projects = extractListSection("projects", {
-    title: ".t-bold span[aria-hidden='true']",
-    date: ".t-black--light span[aria-hidden='true']",
-    description: SELECTORS.EXPANDABLE_TEXT,
-  });
-
-  // Skills (DOM)
-  const domSkills = extractListSection("skills", {
-    name: ".t-bold span[aria-hidden='true']",
-  });
-  if (domSkills.length > 0) {
-    const skillsList = domSkills.map((s) => s.name);
-    candidate.skills = candidate.skills
-      ? [...new Set([...candidate.skills, ...skillsList])]
-      : skillsList;
-  }
-
-  // --- IDIOMAS (Consolidado) ---
-  const languagesList = extractListSection("languages", {
-    language: ".t-bold span[aria-hidden='true']",
-    description: ".t-14.t-normal.t-black--light span[aria-hidden='true']", // Selector actualizado
-  });
-
-  if (languagesList && languagesList.length > 0) {
-    candidate.languages = languagesList.map((lang) => ({
-      language: lang.language,
-      description: lang.description || "",
-    }));
-
-    // Buscar el idioma "Inglés" y asignar su descripción a level_of_english
-    const englishEntry = languagesList.find((l) =>
-      /english|inglés|Ingles|English|Inglés|ingles/i.test(l.language),
-    );
-    if (englishEntry && englishEntry.description) {
-      candidate.level_of_english = englishEntry.description;
-    } else {
-      candidate.level_of_english = ""; // Vacío si no se encuentra descripción
-    }
-
-  }
-
-  // About (Con selector robusto para evitar clases hash)
-  const aboutAnchor = document.getElementById("about");
-  if (aboutAnchor) {
-    const aboutSection = aboutAnchor.closest("section");
-    if (aboutSection) {
-      const aboutTextEl = aboutSection.querySelector(SELECTORS.EXPANDABLE_TEXT);
-      if (aboutTextEl) {
-        const visualText =
-          aboutTextEl.querySelector("span[aria-hidden='true']") || aboutTextEl;
-        const text = cleanString(visualText.innerText);
-        if (text) {
-          candidate.about = text;
-          highlightElement(aboutTextEl);
-        }
-      }
-    }
-  }
-
-  return candidate;
-}
-
-// --- Loop ---
 async function processProfile() {
   if (isProcessing) return;
-  if (!shouldRunInThisContext()) return;
 
-  const loc = getEffectiveLocation();
-  const canonicalPath = getCanonicalProfilePath();
+  if (!isExtensionActive || stopFlag) {
+    const active = await checkExtensionStatus();
+    if (!active) return;
+  }
 
-  if (!canonicalPath || !/^\/in\/[^/]+\/?$/.test(loc.pathname)) return;
-  if (sessionStorage.getItem("ally:lastSent") === canonicalPath) return;
+  if (hasStopSignal()) return;
+
+  const path = getCanonicalProfilePath();
+  if (!path || sessionStorage.getItem("ally:lastSent") === path) return;
 
   isProcessing = true;
-
   try {
-    const candidate = await gatherAndSend();
-    if (candidate && candidate.name) {
-      sessionStorage.setItem("ally:lastSent", canonicalPath);
-      if (!candidate.level_of_english) candidate.level_of_english = "";
-      sendCandidate(candidate);
+    // 1. Mostrar estado "PROCESANDO" (Azul) inmediatamente
+    console.log("[Ally] Iniciando UI...");
+    createOrUpdateCard("processing");
+    if (hasStopSignal()) return;
+
+    await wait(2000); // Espera inicial de carga
+    if (hasStopSignal()) return;
+
+    // 2. Ejecutar extracción (Scroll + Clicks)
+    const payload = await scrapeRawProfile();
+    if (!payload || hasStopSignal()) return;
+
+    if (payload.raw_text.length > 500) {
+      sendToBridge(payload);
+      sessionStorage.setItem("ally:lastSent", path);
+      // Nota: La tarjeta se quedará en "Procesando" hasta que
+      // el listener de arriba reciba la respuesta "success" de la IA.
+    } else {
+      console.warn("[Ally] Texto insuficiente.");
+      // Opcional: Podríamos quitar la tarjeta si falla,
+      // pero por ahora dejamos que el usuario refresque.
     }
-  } catch (error) {
-    console.error("[Ally] Error:", error);
+  } catch (e) {
+    console.error("[Ally] Error:", e);
   } finally {
     isProcessing = false;
   }
 }
 
-// --- Init ---
-function init() {
-  observer = new MutationObserver(() => processProfile());
-  if (document.body)
-    observer.observe(document.body, { childList: true, subtree: true });
-  else
-    window.addEventListener("DOMContentLoaded", () =>
-      observer.observe(document.body, { childList: true, subtree: true }),
-    );
-  setInterval(processProfile, CONFIG.POLL_INTERVAL_MS);
-}
+// Observador de Navegación
+let lastUrl = location.href;
+new MutationObserver(() => {
+  if (location.href !== lastUrl) {
+    lastUrl = location.href;
+    setTimeout(processProfile, 3000);
+  }
+}).observe(document, { subtree: true, childList: true });
 
-init();
+checkExtensionStatus();
+setTimeout(processProfile, 3500);
