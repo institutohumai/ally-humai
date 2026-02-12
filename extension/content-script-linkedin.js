@@ -6,6 +6,7 @@ const CONFIG = {
   CLICK_DELAY_MIN: 300, // Mínimo tiempo entre clics (Anti-Ban)
   CLICK_DELAY_MAX: 700, // Máximo tiempo entre clics (Anti-Ban)
   RENDER_WAIT: 800, // Tiempo extra para que el texto aparezca tras el clic
+  MIN_TEXT_LENGTH: 500, // Mínimo de caracteres para enviar al bridge
 };
 
 let isProcessing = false;
@@ -210,11 +211,10 @@ function createOrUpdateCard(status, data = null) {
 
   // --- ESTADO: ERROR (ROJO) ---
   else if (status === "error") {
-    const detail =
-      sanitizeText(
-        (data && (data.message || data.detail)) ||
-          "No pudimos conectar con ALLY. Reintenta en unos segundos.",
-      );
+    const detail = sanitizeText(
+      (data && (data.message || data.detail)) ||
+        "No pudimos conectar con ALLY. Reintenta en unos segundos.",
+    );
 
     card.style.borderLeftColor = "#e74c3c"; // Rojo
     card.innerHTML = `
@@ -387,13 +387,15 @@ async function processProfile() {
     const payload = await scrapeRawProfile();
     if (!payload || hasStopSignal()) return;
 
-    if (payload.raw_text.length > 500) {
+    if (payload.raw_text.length >= CONFIG.MIN_TEXT_LENGTH) {
       sendToBridge(payload);
       sessionStorage.setItem("ally:lastSent", path);
       // Nota: La tarjeta se quedará en "Procesando" hasta que
       // el listener de arriba reciba la respuesta "success" de la IA.
     } else {
-      console.warn("[Ally] Texto insuficiente.");
+      console.info(
+        `[Ally] Perfil con poca información: (${payload.raw_text.length}/${CONFIG.MIN_TEXT_LENGTH}).`,
+      );
       // Opcional: Podríamos quitar la tarjeta si falla,
       // pero por ahora dejamos que el usuario refresque.
     }

@@ -2,9 +2,9 @@
 
 // Configuración API
 // LOCAL:
-const API_BASE_URL = "http://localhost:8000";
+// const API_BASE_URL = "http://localhost:8000";
 // AWS (Cambiar para producción):
-// const API_BASE_URL = "https://TU-URL-DE-AWS.lambda-url.region.on.aws";
+const API_BASE_URL = "https://vlux2ct9zi.execute-api.us-east-2.amazonaws.com";
 
 const API_ENDPOINT = `${API_BASE_URL}/candidates`;
 
@@ -14,7 +14,7 @@ const BADGE_ERROR_COLOR = "#e74c3c"; // Rojo
 const SESSION_STORAGE_KEY = "ally:supabase-session";
 
 // Configuración de Seguridad (Cinderella Protocol)
-const AUTO_LOGOUT_DELAY = 30 * 60 * 1000; // 30 minutos
+const AUTO_LOGOUT_DELAY = 10 * 60 * 1000; // 10 minutos
 let logoutTimer = null;
 
 // Logging helpers
@@ -125,8 +125,6 @@ function isSameSession(a, b) {
 
 // ESTA FUNCIÓN ES CLAVE PARA EL SLEEP MODE Y AUTO-LOGOUT
 async function handleAuthFailure(reason) {
-  log.warn("Cerrando sesión:", reason);
-
   session = null;
   if (logoutTimer) clearTimeout(logoutTimer); // Limpiar timer
 
@@ -140,6 +138,7 @@ async function handleAuthFailure(reason) {
 
   // 2. ORDENAMOS A LINKEDIN QUE SE DETENGA (Sleep Mode)
   broadcastToTabs({ type: "ALLY_STOP_SCRAPING" });
+  log.info("Cerrando sesión:", reason);
 }
 
 async function loadSessionFromStorage() {
@@ -252,6 +251,41 @@ chrome.runtime.onInstalled.addListener(async () => {
   await updateBadge();
   reinjectLovableContentScripts();
   reinjectLinkedInContentScripts();
+});
+
+// --- SEGURIDAD: Auto-apagado si se cierran todas las pestañas de Lovable ---
+const LOVABLE_PATTERNS = [
+  "preview--grow-agency-pro.lovable.app",
+  "grow-agency-pro.lovable.app",
+];
+
+function isLovableTab(tab) {
+  if (!tab?.url) return false;
+  return LOVABLE_PATTERNS.some((pattern) => tab.url.includes(pattern));
+}
+
+async function checkLovableTabsExist() {
+  return new Promise((resolve) => {
+    chrome.tabs.query({}, (tabs) => {
+      const hasLovable = tabs.some(isLovableTab);
+      resolve(hasLovable);
+    });
+  });
+}
+
+// Cuando se cierra una pestaña, verificamos si era de Lovable
+chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
+  // Solo verificamos si hay sesión activa
+  if (!session) return;
+
+  // Pequeño delay para permitir que Chrome actualice la lista de tabs
+  setTimeout(async () => {
+    const lovableStillOpen = await checkLovableTabsExist();
+    if (!lovableStillOpen) {
+      log.info("Todas las pestañas de Lovable cerradas. Desactivando extensión por seguridad.");
+      await handleAuthFailure("lovable_tabs_closed");
+    }
+  }, 500);
 });
 
 // --- MESSAGE LISTENERS (EL CORAZÓN DEL SISTEMA) ---

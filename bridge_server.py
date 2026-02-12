@@ -13,7 +13,7 @@ from mangum import Mangum
 LOG = logging.getLogger("bridge")
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="Ally Humai AI Bridge (Gemini)", version="3.1.0")
+app = FastAPI(title="Ally Humai AI Bridge (Gemini)", version="3.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,9 +33,8 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # 2. Si no existe (Debug Local), usamos la clave directa
 if not GOOGLE_API_KEY:
-    # CORRECCIÓN: Asignamos el string directamente, no usas os.getenv aquí
-    # GOOGLE_API_KEY = "AIzaSyDtPu5jzz6sq4XCzNiW24D9VmwhY92guGk"
-    GOOGLE_API_KEY = "AIzaSyCaXUclGZAlHiJpawZlXH_2p9BFB5GAifI"  # Reemplaza con tu clave real para pruebas locales
+    # REEMPLAZA CON TU KEY SI LA NECESITAS EN LOCAL
+    GOOGLE_API_KEY = "AIzaSyCaXUclGZAlHiJpawZlXH_2p9BFB5GAifI" 
 
 # 3. Validación final y Configuración
 if not GOOGLE_API_KEY:
@@ -60,17 +59,22 @@ def _parse_profile_with_ai(text: str, url: str) -> Dict[str, Any]:
         "response_mime_type": "application/json",
     }
 
+    # --- PROMPT ACTUALIZADO ---
     system_prompt = """
     Eres un experto reclutador IT. Tu trabajo es extraer datos estructurados de un texto desordenado de un perfil de LinkedIn.
     Extrae la información y devuélvela en formato JSON.
+    
     Campos requeridos:
     - name (string)
     - role (string, último cargo)
     - email (string o null)
     - phone (string o null)
     - location (string)
-    - level_of_english (string, infiere nivel: B1, C1, Native, etc. Si no se menciona, string vacío)
+    - level_of_english (string. Si no se menciona, string vacío)
+    - languages (lista de objetos con: language, description. Ejemplo: [{"language": "Francés", "description": "Nativo o Bilingüe"}])
     - skills (lista de strings)
+    - other_relevant_data (string. Aquí pon TODO el texto de la sección "Acerca de" o "About". Si es muy largo, resúmelo manteniendo las tecnologías y logros clave.)
+    - certifications (lista de objetos con: name, issuer, issue_date. Si no encuentras, lista vacía)
     - work_experience (lista de objetos con: title, company, date_from, date_to, description)
     - education (lista de objetos con: institution, degree, date_from, date_to)
 
@@ -84,7 +88,7 @@ def _parse_profile_with_ai(text: str, url: str) -> Dict[str, Any]:
             generation_config=generation_config
         )
 
-        prompt = f"URL del perfil: {url}\n\nTEXTO DEL PERFIL:\n{text[:25000]}" # Aumentamos límite para Gemini
+        prompt = f"URL del perfil: {url}\n\nTEXTO DEL PERFIL:\n{text[:25000]}" 
 
         LOG.info("[AI] Enviando a Google...")
         response = model.generate_content(prompt)
@@ -94,7 +98,6 @@ def _parse_profile_with_ai(text: str, url: str) -> Dict[str, Any]:
 
     except Exception as e:
         LOG.error(f"[AI] Error crítico con Gemini: {e}")
-        # Devolvemos el error para verlo en el frontend si es necesario
         return {"_error": str(e)}
 
 # --- ENDPOINTS ---
@@ -126,16 +129,16 @@ async def receive_candidate(
     if payload.known_name: 
         final_candidate["name"] = payload.known_name
 
-    # 3. MAPEO
-    # Separar 'name' y 'lastname' si es posible
+    # 3. MAPEO (Separar nombre/apellido)
     full_name = final_candidate.get("name", "")
     name_parts = full_name.split()
     if len(name_parts) > 1:
-        final_candidate["name"] = " ".join(name_parts[:-1])  # Todo menos el último como nombre
-        final_candidate["lastname"] = name_parts[-1]  # Última palabra como apellido
+        final_candidate["name"] = " ".join(name_parts[:-1]) 
+        final_candidate["lastname"] = name_parts[-1] 
     else:
-        final_candidate["lastname"] = ""  # Dejar vacío si no hay apellido
+        final_candidate["lastname"] = "" 
 
+    # --- PAYLOAD FINAL A SUPABASE ---
     supabase_payload = {
         "name": final_candidate.get("name"),
         "lastname": final_candidate.get("lastname"),
@@ -146,7 +149,16 @@ async def receive_candidate(
         "work_experience": final_candidate.get("work_experience", []),
         "education": str(final_candidate.get("education", [])),
         "main_skills": final_candidate.get("skills", []),
-        "level_of_english": final_candidate.get("level_of_english", "")
+        
+        # Inglés (String simple)
+        "level_of_english": final_candidate.get("level_of_english", ""),
+        
+        # Otros Idiomas (Lista de objetos) - NUEVO
+        "languages": final_candidate.get("languages", []),
+
+        # Datos adicionales
+        "other_relevant_data": final_candidate.get("other_relevant_data", ""),
+        "certifications": final_candidate.get("certifications", []) 
     }
 
     # 4. ENVÍO A SUPABASE
@@ -162,7 +174,6 @@ async def receive_candidate(
         "apikey": SUPABASE_ANON_KEY
     }
 
-    # Log del objeto de candidato antes de enviarlo a Supabase
     LOG.info(f"[Bridge] Objeto de candidato enviado a Supabase: {edge_payload}")
 
     try:
