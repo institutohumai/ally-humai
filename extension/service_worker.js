@@ -69,8 +69,8 @@ function notifyBridgeError(detail) {
 // --- INYECCIÓN DE SCRIPTS ---
 function reinjectLovableContentScripts() {
   const lovableUrls = [
-    "https://preview--grow-agency-pro.lovable.app/*",
-    "https://grow-agency-pro.lovable.app/*",
+    "https://preview--allyhirework.lovable.app/*",
+    "https://allyhire.work/*",
   ];
   chrome.tabs.query({ url: lovableUrls }, (tabs) => {
     tabs.forEach((tab) => {
@@ -255,8 +255,8 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 // --- SEGURIDAD: Auto-apagado si se cierran todas las pestañas de Lovable ---
 const LOVABLE_PATTERNS = [
-  "preview--grow-agency-pro.lovable.app",
-  "grow-agency-pro.lovable.app",
+  "preview--allyhirework.lovable.app",
+  "allyhire.work",
 ];
 
 function isLovableTab(tab) {

@@ -17,8 +17,8 @@
     "https://www.linkedin.com/*",
     "https://linkedin.com/*",
     "http://localhost:8000/*",
-    "https://preview--grow-agency-pro.lovable.app/*",
-    "https://grow-agency-pro.lovable.app/*"
+    "https://preview--allyhirework.lovable.app/*",
+    "https://allyhire.work/*"
   ],
   "action": {
     "default_title": "Ally Humai Collector",
@@ -43,8 +43,8 @@
     },
     {
       "matches": [
-        "https://preview--grow-agency-pro.lovable.app/*",
-        "https://grow-agency-pro.lovable.app/*"
+        "https://preview--allyhirework.lovable.app/*",
+        "https://allyhire.work/*"
       ],
       "js": [
         "content-script-lovable.js"
