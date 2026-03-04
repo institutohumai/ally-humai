@@ -123,6 +123,20 @@ async function checkExtensionStatus() {
 // 1. SISTEMA DE NOTIFICACIONES (NUEVO: ESTADOS)
 // ========================================================
 
+// Ally Design System Colors
+const ALLY_COLORS = {
+  primary: '#2b44ff',           // hsl(233, 100%, 58%)
+  primaryForeground: '#ffffff',
+  secondary: 'hsl(180, 65%, 45%)',
+  accent: 'hsl(25, 95%, 55%)',  // Orange for CTAs
+  background: '#ffffff',
+  foreground: 'hsl(220, 15%, 20%)',
+  muted: 'hsl(220, 10%, 96%)',
+  mutedText: 'hsl(220, 10%, 45%)',
+  border: 'hsl(220, 13%, 91%)',
+  destructive: 'hsl(0, 84%, 60%)',
+};
+
 function createOrUpdateCard(status, data = null) {
   // Buscamos si ya existe la tarjeta (para actualizarla en lugar de crear otra)
   let card = document.getElementById("ally-status-card");
@@ -132,23 +146,22 @@ function createOrUpdateCard(status, data = null) {
     card = document.createElement("div");
     card.id = "ally-status-card"; // ID genérico para estados
 
-    // Estilos base
+    // Estilos base - Ally Design System
     Object.assign(card.style, {
       position: "fixed",
       top: "80px", // Debajo del nav de LinkedIn
       right: "20px",
-      width: "280px",
-      backgroundColor: "white",
-      boxShadow: "0 4px 15px rgba(0,0,0,0.2)",
-      borderRadius: "10px",
-      padding: "16px",
+      width: "300px",
+      backgroundColor: ALLY_COLORS.background,
+      boxShadow: "0 8px 24px hsl(220 15% 20% / 0.16)", // Large shadow
+      borderRadius: "12px", // Large radius
+      padding: "20px",
       zIndex: "2147483647", // Máximo posible para que nada lo tape
-      fontFamily:
-        "-apple-system, system-ui, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-      transition: "all 0.3s ease", // Transición suave entre colores/tamaños
+      fontFamily: "'Euclid Circular B', system-ui, -apple-system, sans-serif",
+      transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)", // Smooth transition
       opacity: "0",
       transform: "translateX(20px)",
-      borderLeft: "6px solid #ccc", // Color por defecto
+      border: `1px solid ${ALLY_COLORS.border}`,
     });
 
     document.body.appendChild(card);
@@ -162,68 +175,176 @@ function createOrUpdateCard(status, data = null) {
 
   card.dataset.state = status;
 
-  // --- ESTADO: PROCESANDO (AZUL) ---
+  // --- ESTADO: PROCESANDO (AZUL PRIMARIO) ---
   if (status === "processing") {
-    card.style.borderLeftColor = "#3498db"; // Azul
     card.innerHTML = `
       <div style="display: flex; align-items: center; gap: 12px;">
         <div class="ally-spinner" style="
-            width: 18px; 
-            height: 18px; 
-            border: 3px solid #f3f3f3; 
-            border-top: 3px solid #3498db; 
+            width: 20px; 
+            height: 20px; 
+            border: 3px solid ${ALLY_COLORS.muted}; 
+            border-top: 3px solid ${ALLY_COLORS.primary}; 
             border-radius: 50%; 
             animation: ally-spin 1s linear infinite;">
         </div>
         <div>
-          <h3 style="margin:0; font-size:14px; font-weight:600; color:#2c3e50;">Analizando Perfil...</h3>
-          <p style="margin:2px 0 0 0; font-size:11px; color:#7f8c8d;">Extrayendo info oculta</p>
+          <h3 style="margin:0; font-size:14px; font-weight:600; color:${ALLY_COLORS.foreground};">Analizando Perfil...</h3>
+          <p style="margin:4px 0 0 0; font-size:12px; color:${ALLY_COLORS.mutedText};">Extrayendo información con IA</p>
         </div>
       </div>
       <style>@keyframes ally-spin {0% {transform: rotate(0deg);} 100% {transform: rotate(360deg);}}</style>
     `;
   }
 
-  // --- ESTADO: ÉXITO (VERDE) ---
+  // --- ESTADO: ÉXITO ---
   else if (status === "success") {
-    card.style.borderLeftColor = "#2ecc71"; // Verde
-    card.innerHTML = `
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-        <h3 style="margin:0; font-size:15px; font-weight:700; color:#27ae60;">✅ Perfil Procesado</h3>
-      </div>
-      <div style="font-size:13px; color:#34495e;">
-        <p style="margin: 4px 0;"><strong>Nombre:</strong> ${data.name || "Detectado"}</p>
-        <p style="margin: 4px 0;"><strong>Inglés:</strong> ${data.level_of_english || "N/A"}</p>
-        <p style="margin: 4px 0;"><strong>Skills:</strong> ${(data.skills || []).slice(0, 3).join(", ")}...</p>
-        <p style="margin: 4px 0; color:#95a5a6; font-size:11px; text-align:right;">IA Powered by Gemini</p>
-      </div>
-    `;
+    chrome.storage.local.get(['allyJobs'], (result) => {
+      const jobs = result.allyJobs || [];
+      
+      const jobOptions = jobs.map(job => {
+        return `<option value="${job.id}">${sanitizeText(job.title)} en ${sanitizeText(job.company)}</option>`;
+      }).join('');
 
-    // Auto-ocultar después de 5 segundos
-    setTimeout(() => {
-      if (card) {
-        card.style.opacity = "0";
-        card.style.transform = "translateX(20px)";
-        setTimeout(() => card.remove(), 500);
+      card.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <div style="width: 32px; height: 32px; background: ${ALLY_COLORS.primary}; border-radius: 8px; display: flex; align-items: center; justify-content: center;">
+              <span style="color: white; font-size: 16px;">✓</span>
+            </div>
+            <div>
+              <h3 style="margin:0; font-size:15px; font-weight:600; color:${ALLY_COLORS.foreground};">Perfil Procesado</h3>
+              <p style="margin:2px 0 0 0; font-size:11px; color:${ALLY_COLORS.mutedText};">Listo para asignar</p>
+            </div>
+          </div>
+          <button id="ally-close-btn" style="background:none; border:none; font-size:18px; cursor:pointer; color:${ALLY_COLORS.mutedText}; padding:0; line-height:1; transition: color 0.2s;">×</button>
+        </div>
+        
+        <div style="background:${ALLY_COLORS.muted}; border-radius:8px; padding:12px; margin-bottom:16px;">
+          <p style="margin: 0 0 6px 0; font-size:13px; color:${ALLY_COLORS.foreground};"><strong>${data.name || "Candidato"} ${data.lastname || ""}</strong></p>
+          <p style="margin: 0 0 4px 0; font-size:12px; color:${ALLY_COLORS.mutedText};">Inglés: ${data.level_of_english || "No especificado"}</p>
+          <p style="margin: 0; font-size:12px; color:${ALLY_COLORS.mutedText};">Skills: ${(data.skills || []).slice(0, 3).join(", ") || "N/A"}</p>
+        </div>
+        
+        <div style="margin-bottom: 12px;">
+          <label style="display:block; font-size:12px; font-weight:500; color:${ALLY_COLORS.foreground}; margin-bottom:6px;">Asignar a puesto</label>
+          <select id="ally-job-select" style="
+            width:100%; 
+            height:40px; 
+            padding:0 12px; 
+            border:1px solid ${ALLY_COLORS.border}; 
+            border-radius:8px; 
+            font-size:13px; 
+            font-family:inherit;
+            color:${ALLY_COLORS.foreground};
+            background:white;
+            cursor:pointer;
+            transition: border-color 0.2s, box-shadow 0.2s;
+            outline:none;
+          ">
+            <option value="">Solo guardar en Base de Datos</option>
+            ${jobOptions}
+          </select>
+        </div>
+        
+        <button id="ally-apply-btn" style="
+          width:100%; 
+          height:40px; 
+          background:${ALLY_COLORS.primary}; 
+          color:white; 
+          border:none; 
+          border-radius:8px; 
+          font-size:14px; 
+          font-weight:500; 
+          font-family:inherit;
+          cursor:pointer;
+          transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        ">Confirmar</button>
+        
+        <p style="margin: 12px 0 0 0; color:${ALLY_COLORS.mutedText}; font-size:10px; text-align:center;">Powered by Ally AI</p>
+        
+        <style>
+          #ally-job-select:focus { border-color: ${ALLY_COLORS.primary}; box-shadow: 0 0 0 3px hsl(233 100% 58% / 0.1); }
+          #ally-apply-btn:hover { opacity: 0.9; transform: translateY(-1px); }
+          #ally-apply-btn:active { transform: translateY(0); }
+          #ally-close-btn:hover { color: ${ALLY_COLORS.foreground}; }
+        </style>
+      `;
+
+      // Event listener para cerrar manualmente
+      const closeBtn = card.querySelector('#ally-close-btn');
+      if (closeBtn) {
+        closeBtn.addEventListener('click', () => {
+          card.style.opacity = '0';
+          card.style.transform = 'translateX(20px)';
+          setTimeout(() => card.remove(), 300);
+        });
       }
-    }, 5000);
+
+      // Event listener para confirmar postulación
+      const applyBtn = card.querySelector('#ally-apply-btn');
+      if (applyBtn) {
+        applyBtn.addEventListener('click', () => {
+          const select = card.querySelector('#ally-job-select');
+          const selectedJobId = select ? select.value : '';
+
+          if (selectedJobId) {
+            applyBtn.textContent = 'Asignando...';
+            applyBtn.style.opacity = '0.7';
+            applyBtn.disabled = true;
+            
+            chrome.runtime.sendMessage({
+              type: 'ALLY_ASSIGN_JOB',
+              payload: { candidate_id: data.id, job_id: selectedJobId }
+            }, (response) => {
+              if (response?.ok) {
+                applyBtn.textContent = '¡Añadido!';
+                applyBtn.style.background = ALLY_COLORS.secondary;
+                setTimeout(() => {
+                  card.style.opacity = '0';
+                  card.style.transform = 'translateX(20px)';
+                  setTimeout(() => card.remove(), 300);
+                }, 800);
+              } else {
+                console.error('[Ally UI] Error asignando job:', response?.error);
+                applyBtn.textContent = 'Error asignando a puesto';
+                applyBtn.style.background = ALLY_COLORS.destructive;
+                applyBtn.style.opacity = '1';
+                applyBtn.disabled = false;
+                setTimeout(() => {
+                  applyBtn.textContent = 'Reintentar';
+                  applyBtn.style.background = ALLY_COLORS.primary;
+                }, 2000);
+              }
+            });
+          } else {
+            card.style.opacity = '0';
+            card.style.transform = 'translateX(20px)';
+            setTimeout(() => card.remove(), 300);
+          }
+        });
+      }
+    });
   }
 
-  // --- ESTADO: ERROR (ROJO) ---
+  // --- ESTADO: ERROR ---
   else if (status === "error") {
     const detail = sanitizeText(
       (data && (data.message || data.detail)) ||
         "No pudimos conectar con ALLY. Reintenta en unos segundos.",
     );
 
-    card.style.borderLeftColor = "#e74c3c"; // Rojo
     card.innerHTML = `
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-        <h3 style="margin:0; font-size:15px; font-weight:700; color:#c0392b;">⚠️ Error al enviar</h3>
-        <button data-ally-dismiss style="background:none; border:none; font-size:16px; cursor:pointer; color:#95a5a6;">×</button>
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <div style="width: 32px; height: 32px; background: ${ALLY_COLORS.destructive}; border-radius: 8px; display: flex; align-items: center; justify-content: center;">
+            <span style="color: white; font-size: 16px;">!</span>
+          </div>
+          <h3 style="margin:0; font-size:15px; font-weight:600; color:${ALLY_COLORS.foreground};">Error al procesar</h3>
+        </div>
+        <button data-ally-dismiss style="background:none; border:none; font-size:18px; cursor:pointer; color:${ALLY_COLORS.mutedText}; padding:0; line-height:1;">×</button>
       </div>
-      <p style="margin:4px 0; font-size:13px; color:#7f8c8d; line-height:1.4;">${detail}</p>
-      <p style="margin:6px 0 0 0; font-size:11px; color:#bdc3c7;">Verifica tu conexión o vuelve a intentar luego.</p>
+      <p style="margin:0 0 8px 0; font-size:13px; color:${ALLY_COLORS.mutedText}; line-height:1.5;">${detail}</p>
+      <p style="margin:0; font-size:11px; color:${ALLY_COLORS.mutedText};">Verifica tu conexión o reintenta.</p>
     `;
 
     const dismissButton = card.querySelector("[data-ally-dismiss]");

@@ -368,4 +368,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
+
+  // 5. ASIGNAR JOB (Desde el modal de LinkedIn)
+  if (message?.type === "ALLY_ASSIGN_JOB") {
+    (async () => {
+      const currentSession = session || await loadSessionFromStorage();
+      if (!currentSession) {
+        return sendResponse({ ok: false, error: "No hay sesión activa" });
+      }
+      const { candidate_id, job_id } = message.payload;
+
+      // Reemplazar la URL con la de tu proyecto Lovable real
+      const assignUrl = 'https://wiqehffqymegcbqgggjk.supabase.co/functions/v1/assign-candidate-job';
+
+      try {
+        const resp = await fetch(assignUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${currentSession.accessToken}`
+          },
+          body: JSON.stringify({ candidate_id, job_id })
+        });
+        if (!resp.ok) throw new Error(`Error de Supabase: ${resp.status}`);
+        sendResponse({ ok: true });
+      } catch (error) {
+        log.error("Error asignando job:", error);
+        sendResponse({ ok: false, error: error.message });
+      }
+    })();
+    return true;
+  }
 });

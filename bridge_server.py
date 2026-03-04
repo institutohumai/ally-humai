@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, Dict, Any
 from mangum import Mangum
+from dotenv import load_dotenv
+load_dotenv()  # Carga .env antes de os.getenv()
 
 # Configuración de Logs
 LOG = logging.getLogger("bridge")
@@ -31,14 +33,9 @@ SUPABASE_FUNCTION_URL = f"{SUPABASE_URL}/functions/v1/import-candidates"
 # 1. Intentamos leer la clave del entorno (Lo correcto para Prod)
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# 2. Si no existe (Debug Local), usamos la clave directa
+# 2. Si no existe (Debug Local), levanta error
 if not GOOGLE_API_KEY:
-    # REEMPLAZA CON TU KEY SI LA NECESITAS EN LOCAL
-    GOOGLE_API_KEY = "AIzaSyCaXUclGZAlHiJpawZlXH_2p9BFB5GAifI" 
-
-# 3. Validación final y Configuración
-if not GOOGLE_API_KEY:
-    raise RuntimeError("GOOGLE_API_KEY no encontrada. Configúrala en variables de entorno o en el código.")
+    raise RuntimeError("GOOGLE_API_KEY no encontrada. Configúrala en variables de entorno.")
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
@@ -182,6 +179,34 @@ async def receive_candidate(
              LOG.error(f"Supabase Error {resp.status_code}: {resp.text}")
              raise HTTPException(status_code=resp.status_code, detail=f"DB Error: {resp.text}")
              
+        # NUEVO: Extraer el ID de la respuesta de Supabase de forma robusta
+        try:
+            supabase_data = resp.json()
+            LOG.info(f"[Bridge] Respuesta cruda de Supabase: {supabase_data}") # CRUCIAL PARA DEBUGGEAR
+            
+            # Buscamos el ID en los formatos más comunes
+            if isinstance(supabase_data, dict):
+                if "id" in supabase_data:
+                    final_candidate["id"] = supabase_data["id"]
+                elif "results" in supabase_data and isinstance(supabase_data["results"], dict):
+                    # Formato: { results: { success: [{ id: "..." }] } }
+                    success_list = supabase_data["results"].get("success", [])
+                    if len(success_list) > 0 and "id" in success_list[0]:
+                        final_candidate["id"] = success_list[0]["id"]
+                elif "data" in supabase_data and isinstance(supabase_data["data"], list) and len(supabase_data["data"]) > 0:
+                    final_candidate["id"] = supabase_data["data"][0].get("id")
+                elif "candidates" in supabase_data and isinstance(supabase_data["candidates"], list) and len(supabase_data["candidates"]) > 0:
+                    final_candidate["id"] = supabase_data["candidates"][0].get("id")
+            elif isinstance(supabase_data, list) and len(supabase_data) > 0:
+                final_candidate["id"] = supabase_data[0].get("id")
+            
+            # Verificación final
+            if "id" not in final_candidate:
+                LOG.warning(f"[Bridge] ⚠️ ALERTA: No encontramos la key 'id' en la respuesta de Supabase. Estructura recibida: {supabase_data}")
+                
+        except Exception as e:
+            LOG.warning(f"[Bridge] Error intentando parsear el ID devuelto por Supabase: {e}")
+            
         LOG.info("[Bridge] Éxito total.")
         return {"status": "processed_with_gemini", "data": final_candidate}
         

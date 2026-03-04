@@ -57,6 +57,19 @@ window.addEventListener('message', (event) => {
     }
   }
 
+  if (event.data.type === 'ALLY_JOBS_UPDATE') {
+    if (ensureExtensionContext('JOBS_UPDATE')) {
+      const jobs = event.data.payload || [];
+      chrome.storage.local.set({ allyJobs: jobs }, () => {
+        if (chrome.runtime.lastError) {
+          console.error('[Ally Content Script] Error guardando vacantes:', chrome.runtime.lastError.message);
+        } else {
+          console.log(`[Ally Content Script] ${jobs.length} vacantes sincronizadas`);
+        }
+      });
+    }
+  }
+
   if (event.data.type === 'ALLY_SESSION_LOGOUT') {
     if (ensureExtensionContext('SESSION_LOGOUT')) {
       try {
