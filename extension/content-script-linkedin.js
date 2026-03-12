@@ -202,7 +202,9 @@ function createOrUpdateCard(status, data = null) {
       const jobs = result.allyJobs || [];
       
       const jobOptions = jobs.map(job => {
-        return `<option value="${job.id}">${sanitizeText(job.title)} en ${sanitizeText(job.company)}</option>`;
+        const role = job.role_description || job.title || 'Sin título';
+        const company = job.company || '';
+        return `<option value="${job.id}">${sanitizeText(role)} en ${sanitizeText(company)}</option>`;
       }).join('');
 
       card.innerHTML = `

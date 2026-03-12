@@ -58,15 +58,27 @@ window.addEventListener('message', (event) => {
   }
 
   if (event.data.type === 'ALLY_JOBS_UPDATE') {
+    console.log('[Ally Content Script] 📥 Evento ALLY_JOBS_UPDATE recibido');
+    console.log('[Ally Content Script] Payload crudo:', event.data);
+    
     if (ensureExtensionContext('JOBS_UPDATE')) {
       const jobs = event.data.payload || [];
+      console.log('[Ally Content Script] Jobs parseados:', jobs.length, 'vacantes');
+      console.log('[Ally Content Script] Detalle de jobs:', JSON.stringify(jobs, null, 2));
+      
       chrome.storage.local.set({ allyJobs: jobs }, () => {
         if (chrome.runtime.lastError) {
-          console.error('[Ally Content Script] Error guardando vacantes:', chrome.runtime.lastError.message);
+          console.error('[Ally Content Script] ❌ Error guardando vacantes:', chrome.runtime.lastError.message);
         } else {
-          console.log(`[Ally Content Script] ${jobs.length} vacantes sincronizadas`);
+          console.log(`[Ally Content Script] ✅ ${jobs.length} vacantes guardadas en storage`);
+          // Verificación de lectura
+          chrome.storage.local.get(['allyJobs'], (result) => {
+            console.log('[Ally Content Script] 🔍 Verificación - Jobs en storage:', result.allyJobs?.length || 0);
+          });
         }
       });
+    } else {
+      console.warn('[Ally Content Script] ⚠️ Extension context no disponible para JOBS_UPDATE');
     }
   }
 
