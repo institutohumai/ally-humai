@@ -1,6 +1,7 @@
 import logging
 import os
 import json
+import time
 import requests
 import google.generativeai as genai
 from fastapi import FastAPI, HTTPException, Header
@@ -39,6 +40,9 @@ if not GOOGLE_API_KEY:
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
+# Modelo configurable via env var: cambiar sin redeploy desde la consola de Lambda.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
 
 # --- MODELOS ---
 class RawProfilePayload(BaseModel):
@@ -48,9 +52,19 @@ class RawProfilePayload(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
 # --- LÓGICA IA (GEMINI) ---
+def _classify_ai_error(err: Exception) -> int:
+    """Mapea excepciones de Gemini a códigos HTTP que tengan sentido para el cliente."""
+    s = str(err)
+    if "429" in s or "RESOURCE_EXHAUSTED" in s:
+        return 429
+    if "503" in s or "UNAVAILABLE" in s or "deadline exceeded" in s.lower():
+        return 503
+    return 500
+
+
 def _parse_profile_with_ai(text: str, url: str) -> Dict[str, Any]:
     LOG.info(f"[AI] Procesando perfil: {url}")
-    
+
     generation_config = {
         "temperature": 0.1,
         "response_mime_type": "application/json",
@@ -78,29 +92,47 @@ def _parse_profile_with_ai(text: str, url: str) -> Dict[str, Any]:
     Si no encuentras un dato, usa null o lista vacía. Intenta formatear fechas como YYYY-MM.
     """
 
-    try:
-        model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
-            system_instruction=system_prompt,
-            generation_config=generation_config
-        )
+    prompt = f"URL del perfil: {url}\n\nTEXTO DEL PERFIL:\n{text[:25000]}"
 
-        prompt = f"URL del perfil: {url}\n\nTEXTO DEL PERFIL:\n{text[:25000]}" 
+    max_attempts = 3
+    backoff_s = 1.0
+    last_err: Optional[Exception] = None
 
-        LOG.info("[AI] Enviando a Google...")
-        response = model.generate_content(prompt)
-        LOG.info("[AI] Respuesta recibida.")
-        
-        return json.loads(response.text)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            model = genai.GenerativeModel(
+                model_name=GEMINI_MODEL,
+                system_instruction=system_prompt,
+                generation_config=generation_config,
+            )
 
-    except Exception as e:
-        LOG.error(f"[AI] Error crítico con Gemini: {e}")
-        return {"_error": str(e)}
+            LOG.info(f"[AI] Enviando a Google (modelo={GEMINI_MODEL}, intento={attempt}/{max_attempts})...")
+            response = model.generate_content(prompt)
+            LOG.info("[AI] Respuesta recibida.")
+
+            return json.loads(response.text)
+
+        except Exception as e:
+            last_err = e
+            status = _classify_ai_error(e)
+            retriable = status in (429, 503) and attempt < max_attempts
+            if retriable:
+                LOG.warning(f"[AI] Error transitorio {status} ({e}); retry en {backoff_s:.1f}s")
+                time.sleep(backoff_s)
+                backoff_s *= 2
+                continue
+            LOG.error(f"[AI] Error con Gemini (status={status}): {e}")
+            break
+
+    return {
+        "_error": str(last_err) if last_err else "unknown",
+        "_status": _classify_ai_error(last_err) if last_err else 500,
+    }
 
 # --- ENDPOINTS ---
 @app.get("/health")
 def health():
-    return {"status": "ok", "mode": "gemini_powered"}
+    return {"status": "ok", "mode": "gemini_powered", "model": GEMINI_MODEL}
 
 @app.post("/candidates", status_code=202)
 async def receive_candidate(
@@ -118,7 +150,8 @@ async def receive_candidate(
         raise HTTPException(status_code=500, detail="AI returned empty response")
     
     if "_error" in extracted_data:
-        raise HTTPException(status_code=500, detail=f"AI Error: {extracted_data['_error']}")
+        status = extracted_data.get("_status", 500)
+        raise HTTPException(status_code=status, detail=f"AI Error: {extracted_data['_error']}")
 
     # 2. PROCESAMIENTO
     final_candidate = extracted_data
